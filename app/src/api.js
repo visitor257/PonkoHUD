@@ -53,6 +53,10 @@ export const askAgent = (text, onEvent, onEnd, history) => stream('/api/agent', 
 export const getLlmConfig = () => fetch('/api/llm/config')
   .then((r) => r.json()).catch(() => ({ configured: false }));
 export const saveLlmConfig = (cfg) => post('/api/llm/config', cfg);
+// 连通性验证：真的打一次远端接口，返回 { ok, ms, model, via } 或 { ok:false, error }
+export const testLlmConfig = (cfg) => fetch('/api/llm/test', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg || {}),
+}).then((r) => r.json()).catch((e) => ({ ok: false, error: '请求后端失败：' + String(e.message) }));
 export const abortShell = () => fetch('/api/shell', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ abort: true }),
 });

@@ -76,8 +76,10 @@ function activeInputPanel() { return focus === 'shell' ? panels.shell : panels.a
 // 配置框：把隐藏输入框内容同步到当前字段（字段态写值，按钮态清空）
 function syncCfgHidden() {
   const a = panels.agent;
-  if (a.form.idx >= 0 && a.form.idx < a.form.fields.length) hidden.value = a.form.fields[a.form.idx].value || '';
-  else hidden.value = '';
+  // 循环字段（协议）不接受文本输入，靠 ←→ 切换，所以这里要把它清空
+  if (a.form.idx >= 0 && a.form.idx < a.form.fields.length && a.cfgFieldEditable()) {
+    hidden.value = a.form.fields[a.form.idx].value || '';
+  } else hidden.value = '';
 }
 
 function syncHidden() {
@@ -127,8 +129,9 @@ hidden.addEventListener('input', (e) => {
   // 配置框编辑态：把隐藏输入框的内容写进当前字段（按钮态不接受文本）
   if (focus === 'agent' && panels.agent.inConfig) {
     const a = panels.agent;
-    if (a.form.idx >= 0 && a.form.idx < a.form.fields.length) a.form.fields[a.form.idx].value = hidden.value;
-    else hidden.value = '';
+    if (a.form.idx >= 0 && a.form.idx < a.form.fields.length && a.cfgFieldEditable()) {
+      a.form.fields[a.form.idx].value = hidden.value;
+    } else hidden.value = '';          // 按钮态/循环字段：文本一律丢弃
     mood.touch();
     return;
   }
@@ -153,6 +156,8 @@ hidden.addEventListener('keydown', (e) => {
     if (e.isComposing) return;
     if (e.key === 'Tab' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault(); a.configNav(e.key === 'ArrowUp' ? -1 : 1); syncCfgHidden();
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault(); a.configCycle(e.key === 'ArrowLeft' ? -1 : 1); syncCfgHidden();
     } else if (e.key === 'Enter') {
       e.preventDefault(); a.configEnter(); syncCfgHidden();
     } else if (e.key === 'Escape') {

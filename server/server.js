@@ -18,19 +18,36 @@ const { pty } = require('./pty');
 // ─────────────────────────────── LLM 接入配置（本地持久化到 llm-config.json）
 // 用户在前端填 API 地址 / API Key / 模型；配好后 /api/agent 改走真 LLM 流式调用。
 const LLM_CFG_PATH = path.join(__dirname, 'llm-config.json');
-let llmCfg = { baseUrl: '', apiKey: '', model: '', configured: false };
+// provider  = 用户的选择：auto（自动识别）/ openai（OpenAI 兼容）/ anthropic（Claude 原生）
+// resolved  = 自动识别后实际用到的协议，写盘后对话时就不用再猜
+// rawProvider：只认两个真协议，其它（含空串）一律 ''（= 还没识别/不适用）
+// normProvider：在 rawProvider 之上把空值补成 auto，用于"用户意图"字段
+function rawProvider(p) {
+  const s = String(p || '').trim().toLowerCase();
+  return (s === 'openai' || s === 'anthropic') ? s : '';
+}
+function normProvider(p) {
+  return rawProvider(p) || 'auto';
+}
+let llmCfg = { baseUrl: '', apiKey: '', model: '', provider: 'auto', resolved: '', configured: false };
 (function loadLlmCfg() {
   try {
     const j = JSON.parse(fs.readFileSync(LLM_CFG_PATH, 'utf8'));
     llmCfg = Object.assign({ baseUrl: '', apiKey: '', model: '' }, j);
   } catch (e) { /* 没有配置文件就用默认值 */ }
+  llmCfg.provider = normProvider(llmCfg.provider);
+  llmCfg.resolved = rawProvider(llmCfg.resolved);
   llmCfg.configured = !!(llmCfg.baseUrl && llmCfg.apiKey);
 })();
 function saveLlmCfg(cfg) {
+  const prov = normProvider(cfg.provider || llmCfg.provider);
   llmCfg = {
     baseUrl: (cfg.baseUrl || '').trim(),
     apiKey: (cfg.apiKey || '').trim(),
     model: (cfg.model || llmCfg.model || 'gpt-3.5-turbo').trim(),
+    provider: prov,
+    // 显式选了协议就等于确定了（resolved 同步过去）；auto 则以探测结果为准
+    resolved: rawProvider(cfg.resolved) || (prov === 'auto' ? '' : prov),
   };
   llmCfg.configured = !!(llmCfg.baseUrl && llmCfg.apiKey);
   try { fs.writeFileSync(LLM_CFG_PATH, JSON.stringify(llmCfg, null, 2)); } catch (e) { /* 写不了就内存里用着 */ }
@@ -38,7 +55,131 @@ function saveLlmCfg(cfg) {
 }
 // 不回传明文 key，只告诉前端"有没有配过"
 function publicLlmCfg() {
-  return { configured: llmCfg.configured, baseUrl: llmCfg.baseUrl, model: llmCfg.model, hasKey: !!llmCfg.apiKey };
+  return {
+    configured: llmCfg.configured, baseUrl: llmCfg.baseUrl, model: llmCfg.model,
+    hasKey: !!llmCfg.apiKey, provider: llmCfg.provider, resolved: llmCfg.resolved || '',
+  };
+}
+// 对话时真正用的协议：探测结果优先，其次用户显式选择，都没有就按 OpenAI 兼容走
+function activeProvider() {
+  return rawProvider(llmCfg.resolved) || rawProvider(llmCfg.provider) || 'openai';
+}
+
+// ─────────────────────────── LLM 连通性验证（保存前必须真的打一次接口）
+// 之前 /api/llm/config 只做「非空→写盘」，于是乱填地址/Key 也能"配置成功"，
+// 直到第一次对话才炸。现在保存前先探一次，并且顺便认出对面是什么协议：
+//   OpenAI 兼容：GET {base}/v1/models（顺带校模型名）→ 不行再 POST /v1/chat/completions 探针
+//   Anthropic  ：POST {base}/v1/messages（x-api-key + anthropic-version）
+// 两者报文完全不通，所以「自动识别」就是按顺序各试一次，谁通用谁。
+function llmV1(base) {
+  const b = String(base || '').trim().replace(/\/+$/, '');
+  return b.replace(/\/v1$/, '') + '/v1';          // 兼容带或不带 /v1 的地址
+}
+const ANTHROPIC_VERSION = '2023-06-01';
+
+async function probeOpenAI(base, apiKey, model, t0) {
+  const v1 = llmV1(base);
+  const hdr = { Authorization: 'Bearer ' + apiKey, Accept: 'application/json' };
+  let netErr = '';
+
+  // ① 模型列表
+  try {
+    const r = await fetch(v1 + '/models', { headers: hdr, signal: AbortSignal.timeout(10000) });
+    if (r.ok) {
+      const j = await r.json().catch(() => null);
+      const ids = j && Array.isArray(j.data)
+        ? j.data.map((x) => x.id || x.name).filter(Boolean)
+        : [];
+      if (ids.length && !ids.includes(model)) {
+        const tip = ids.slice(0, 6).join(' / ') + (ids.length > 6 ? ' …' : '');
+        return { ok: false, ms: Date.now() - t0, provider: 'openai', models: ids, error: `Key 有效，但没找到模型「${model}」。可用：${tip}` };
+      }
+      return { ok: true, ms: Date.now() - t0, provider: 'openai', model, via: 'models', models: ids };
+    }
+    if (r.status === 401 || r.status === 403) {
+      const d = await r.text().catch(() => '');
+      return { ok: false, ms: Date.now() - t0, provider: 'openai', error: `鉴权失败（HTTP ${r.status}）：Key 不对或没有权限 ${d.slice(0, 120)}` };
+    }
+    // 其他状态码：落到 ② 再试一次
+  } catch (e) {
+    netErr = e.name === 'TimeoutError' ? '请求 /models 超时' : ('连不上：' + e.message);
+  }
+
+  // ② 极小对话探针
+  try {
+    const r = await fetch(v1 + '/chat/completions', {
+      method: 'POST',
+      headers: { ...hdr, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, stream: false, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (r.ok) return { ok: true, ms: Date.now() - t0, provider: 'openai', model, via: 'chat' };
+    let d = '';
+    try { d = (await r.text()).slice(0, 160); } catch (e) {}
+    if (r.status === 401 || r.status === 403) return { ok: false, ms: Date.now() - t0, provider: 'openai', error: `鉴权失败（HTTP ${r.status}）：Key 不对 ${d}` };
+    if (r.status === 404) return { ok: false, ms: Date.now() - t0, provider: 'openai', error: `没有 ${v1}/chat/completions（HTTP 404）：地址填错了吗？` };
+    return { ok: false, ms: Date.now() - t0, provider: 'openai', error: `LLM 返回 HTTP ${r.status}：${d}` };
+  } catch (e) {
+    const m = e.name === 'TimeoutError' ? '对话请求超时' : ('连不上：' + e.message);
+    return { ok: false, ms: Date.now() - t0, provider: 'openai', error: netErr || m };
+  }
+}
+
+async function probeAnthropic(base, apiKey, model, t0) {
+  const url = llmV1(base) + '/messages';
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': ANTHROPIC_VERSION,
+      },
+      body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (r.ok) {
+      let j = null; try { j = await r.json(); } catch (e) {}
+      return { ok: true, ms: Date.now() - t0, provider: 'anthropic', model: (j && j.model) || model, via: 'messages' };
+    }
+    let d = '';
+    try { d = (await r.text()).slice(0, 160); } catch (e) {}
+    if (r.status === 401 || r.status === 403) return { ok: false, ms: Date.now() - t0, provider: 'anthropic', error: `鉴权失败（HTTP ${r.status}）：x-api-key 不对或没权限 ${d}` };
+    if (r.status === 404) return { ok: false, ms: Date.now() - t0, provider: 'anthropic', error: `没有 ${url}（HTTP 404）：这不是 Anthropic 接口吧？` };
+    return { ok: false, ms: Date.now() - t0, provider: 'anthropic', error: `Anthropic 返回 HTTP ${r.status}：${d}` };
+  } catch (e) {
+    const m = e.name === 'TimeoutError' ? 'Anthropic 请求超时' : ('连不上：' + e.message);
+    return { ok: false, ms: Date.now() - t0, provider: 'anthropic', error: m };
+  }
+}
+
+async function testLlm(cfg) {
+  const base = String((cfg && cfg.baseUrl) || llmCfg.baseUrl || '').trim();
+  const apiKey = String((cfg && cfg.apiKey) || llmCfg.apiKey || '').trim();
+  const model = String((cfg && cfg.model) || llmCfg.model || '').trim() || 'gpt-3.5-turbo';
+  if (!base) return { ok: false, error: '缺少 API 地址' };
+  if (!apiKey) return { ok: false, error: '缺少 API Key' };
+
+  let u;
+  try { u = new URL(base); } catch (e) { return { ok: false, error: `API 地址不是合法 URL：${base}` }; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    return { ok: false, error: 'API 地址必须以 http:// 或 https:// 开头' };
+  }
+
+  const t0 = Date.now();
+  const want = normProvider((cfg && cfg.provider) || llmCfg.provider);
+  if (want === 'anthropic') return probeAnthropic(base, apiKey, model, t0);
+  if (want === 'openai') return probeOpenAI(base, apiKey, model, t0);
+
+  // auto：OpenAI 兼容先试（中转站绝大多数是它），不行再试 Anthropic 原生
+  const a = await probeOpenAI(base, apiKey, model, t0);
+  if (a.ok) return a;
+  const b = await probeAnthropic(base, apiKey, model, t0);
+  if (b.ok) return b;
+  // 两个都不通：优先展示"真连上了但被拒"的那条（鉴权类比 404/连不上更能说明问题）
+  const pick = [a, b].find((x) => /鉴权失败/.test(x.error || '')) || a;
+  return { ok: false, ms: Date.now() - t0, error: pick.error, models: pick.models, tried: ['openai', 'anthropic'] };
 }
 
 const ROOT = path.resolve(__dirname, '..');
@@ -442,9 +583,11 @@ async function streamAgent(res, text, history) {
   res.end();
 }
 
-// 真 LLM（OpenAI 兼容 /chat/completions，SSE 流式）。心情标记 [[mood:...]] 仍由原解析器处理，
-// 所以真模型只要按协议在正文里声明情绪，前端/角色链路一行都不用改。
+// 真 LLM（SSE 流式）。两套协议：OpenAI 兼容 /chat/completions 与 Anthropic 原生 /messages。
+// 心情标记 [[mood:...]] 仍由原解析器处理，所以真模型只要按协议在正文里声明情绪，
+// 前端/角色链路一行都不用改。
 async function callRealLLM(res, emit, text, history) {
+  if (activeProvider() === 'anthropic') { await callAnthropic(res, emit, text, history); return; }
   const base = (llmCfg.baseUrl || '').replace(/\/+$/, '');
   if (!base) { emit({ t: 'error', text: 'LLM 未配置：缺少 API 地址' }); return; }
   const url = base.replace(/\/v1$/, '') + '/v1/chat/completions';   // 兼容带或不带 /v1 的地址
@@ -503,6 +646,94 @@ async function callRealLLM(res, emit, text, history) {
   emit({ t: 'done', tokens: Math.max(1, tokens) });
 }
 
+// Anthropic 原生（Claude）：POST /v1/messages，x-api-key 头，SSE 事件是
+// content_block_delta{ delta:{ type:'text_delta', text } }，跟 OpenAI 的 choices[0].delta 不是一回事。
+// 两个 Anthropic 特有的坑：system 必须单独字段（不能塞进 messages）；
+// user/assistant 必须严格交替（连续同角色要合并），否则 400。
+async function callAnthropic(res, emit, text, history) {
+  const base = (llmCfg.baseUrl || '').replace(/\/+$/, '');
+  if (!base) { emit({ t: 'error', text: 'LLM 未配置：缺少 API 地址' }); return; }
+  const url = base.replace(/\/v1$/, '') + '/v1/messages';
+  const sys = moodp.buildSystemPrompt(facesFromPacks());
+
+  const raw = [];
+  if (Array.isArray(history)) {
+    for (const m of history.slice(-10)) {
+      if (!m || !m.content) continue;
+      if (m.role === 'system') continue;                     // system 走单独字段
+      raw.push({ role: m.role === 'agent' ? 'assistant' : 'user', content: String(m.content) });
+    }
+  }
+  raw.push({ role: 'user', content: text });
+  // 合并连续同角色 + 保证首条是 user
+  const messages = [];
+  for (const m of raw) {
+    const prev = messages[messages.length - 1];
+    if (prev && prev.role === m.role) prev.content += '\n' + m.content;
+    else messages.push({ role: m.role, content: m.content });
+  }
+  while (messages.length && messages[0].role !== 'user') messages.shift();
+  if (!messages.length) messages.push({ role: 'user', content: text });
+
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+        'x-api-key': llmCfg.apiKey,
+        'anthropic-version': ANTHROPIC_VERSION,
+      },
+      body: JSON.stringify({
+        model: llmCfg.model || 'claude-3-5-sonnet-latest',
+        max_tokens: 1024,
+        system: sys,
+        messages,
+        stream: true,
+      }),
+    });
+  } catch (e) { emit({ t: 'error', text: '连不上 LLM：' + e.message }); return; }
+  if (!resp.ok) {
+    let detail = '';
+    try { detail = (await resp.text()).slice(0, 240); } catch (e) {}
+    emit({ t: 'error', text: `LLM 返回 ${resp.status}：${detail}` });
+    return;
+  }
+
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '', tokens = 0;
+  const parser = new moodp.MoodStreamParser(facesFromPacks());
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+        if (!line || !line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') continue;
+        let j; try { j = JSON.parse(data); } catch (e) { continue; }
+        let delta = '';
+        if (j.type === 'content_block_delta' && j.delta && typeof j.delta.text === 'string') delta = j.delta.text;
+        else if (j.type === 'message_delta' && j.delta && typeof j.delta.text === 'string') delta = j.delta.text;
+        if (j.type === 'error' && j.error && j.error.message) { emit({ t: 'error', text: String(j.error.message).slice(0, 200) }); }
+        if (!delta) continue;
+        const taken = parser.feed(delta);
+        for (const m of taken.moods) emit({ t: 'mood', ...m, src: 'agent' });
+        if (taken.text) { emit({ t: 'token', text: taken.text }); tokens++; }
+      }
+    }
+  } catch (e) { emit({ t: 'error', text: '读取 LLM 流失败：' + e.message }); }
+  const tail = parser.flush();
+  for (const m of tail.moods) emit({ t: 'mood', ...m, src: 'agent' });
+  if (tail.text) { emit({ t: 'token', text: tail.text }); tokens++; }
+  emit({ t: 'done', tokens: Math.max(1, tokens) });
+}
+
 /** 当前所有素材包的表情标签（给 LLM 的 system 提示词用） */
 function facesFromPacks() {
   const out = new Set();
@@ -541,6 +772,11 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/llm/config' && req.method === 'POST') {
       const body = JSON.parse((await readBody(req)) || '{}');
       return sendJson(res, saveLlmCfg(body));
+    }
+    // LLM 连通性验证：真的打一次远端接口，前端据此决定要不要落盘
+    if (p === '/api/llm/test' && req.method === 'POST') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      return sendJson(res, await testLlm(body));
     }
     if (p === '/api/charpacks') return sendJson(res, listCharpacks());
 
