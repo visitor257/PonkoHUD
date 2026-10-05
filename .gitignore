@@ -1,0 +1,22 @@
+# 运行时产物
+run/
+__pycache__/
+*.pyc
+*.pyo
+
+# 本机私密配置（含明文 API key），绝不能入库
+server/llm-config.json
+
+# 网络地理缓存（含本机真实 IP / 地理位置）
+server/netgeo-cache.json
+
+# 临时诊断脚本
+tools/_*
+tools/*.log
+tools/*.png
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

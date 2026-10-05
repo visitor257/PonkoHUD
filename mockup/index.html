@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>PONKO HUD · 界面视觉稿</title>
+<style>
+  *{box-sizing:border-box}
+  :root{
+    --accent:#35d0e0;
+    --accent-dim:#123c46;
+    --line:#14344a;
+    --line-soft:#0f2436;
+    --bg:#050c14;
+    --panel:#0b1a26;
+    --panel-2:#08131d;
+    --text:#b9d6e6;
+    --text-dim:#5f8299;
+    --font:"Cascadia Mono","JetBrains Mono","Sarasa Mono SC",Consolas,"Microsoft YaHei Mono",monospace;
+  }
+  html,body{height:100%}
+  body{
+    margin:0;background:var(--bg);color:var(--text);
+    font-family:var(--font);font-size:13px;line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  .app{
+    height:100vh;display:grid;grid-template-rows:42px 1fr 32px;
+    background-image:linear-gradient(var(--line-soft) 1px,transparent 1px),linear-gradient(90deg,var(--line-soft) 1px,transparent 1px);
+    background-size:44px 44px;
+  }
+  .bar{display:flex;align-items:center;gap:14px;padding:0 14px;border-bottom:1px solid var(--line);background:rgba(5,12,20,.86)}
+  .logo{color:var(--accent);letter-spacing:2px;font-weight:600}
+  .logo b{background:var(--accent);color:#04141a;padding:0 6px;margin-right:8px}
+  .tabs{display:flex;gap:2px;margin-left:6px}
+  .tab{padding:2px 12px;color:var(--text-dim);border:1px solid transparent;font-size:12px}
+  .tab.on{color:var(--accent);border-color:var(--accent-dim);background:rgba(53,208,224,.07)}
+  .spacer{flex:1}
+  .meta{color:var(--text-dim);font-size:12px;display:flex;gap:16px;align-items:center}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);display:inline-block;margin-right:6px;animation:pulse 2.4s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+  .main{display:flex;padding:8px;min-height:0}
+  .panel{background:var(--panel);border:1px solid var(--line);display:flex;flex-direction:column;min-height:0;position:relative;transition:border-color .15s}
+  .panel:hover{border-color:var(--accent-dim)}
+  .col{display:flex;flex-direction:column;gap:8px;min-height:0}
+  .split{width:7px;flex:none;cursor:col-resize;display:flex;align-items:center;justify-content:center;color:var(--line)}
+  .split::before{content:"│";font-size:10px}
+  .split:hover,.split.active{color:var(--accent)}
+  .chat::-webkit-scrollbar{width:6px}
+  .chat::-webkit-scrollbar-thumb{background:var(--accent-dim)}
+  .chat::-webkit-scrollbar-track{background:transparent}
+  .panel::after{content:"";position:absolute;top:-1px;left:-1px;width:9px;height:9px;border-top:1px solid var(--accent);border-left:1px solid var(--accent)}
+  .ph{padding:4px 10px;font-size:11px;letter-spacing:2px;color:var(--accent);border-bottom:1px dashed var(--line);display:flex;justify-content:space-between}
+  .ph span{color:var(--text-dim);letter-spacing:0}
+  .pb{padding:9px 11px;overflow:hidden}
+  .row{display:flex;justify-content:space-between;margin-bottom:3px;font-size:12px}
+  .row i{color:var(--text-dim);font-style:normal}
+  .bar-track{height:7px;background:var(--panel-2);border:1px solid var(--line-soft);margin-bottom:9px;position:relative;overflow:hidden}
+  .bar-fill{height:100%;background:var(--accent);opacity:.75}
+  .bar-fill.warn{background:#e0a04a}
+  .bar-fill.crit{background:#e06a6a}
+  .sep{height:1px;background:var(--line-soft);margin:10px 0}
+  .spark{color:var(--accent);letter-spacing:1px;font-size:14px}
+  .kv{display:flex;justify-content:space-between;font-size:12px;color:var(--text-dim)}
+  .kv b{color:var(--text);font-weight:400}
+  .term{flex:1;padding:9px 13px;overflow-y:auto;font-size:12.5px;color:var(--text-dim);line-height:1.75}
+  .term p{margin:0 0 3px}
+  .term .warn{color:#e0a04a}
+  .cmdline{display:flex;align-items:center;gap:8px;border-top:1px dashed var(--line);padding:7px 13px;background:var(--panel-2)}
+  .cmdline .ps{color:var(--accent);white-space:nowrap}
+  .cmdline input::placeholder{color:#3d5a6d}
+  .moodhist{display:flex;justify-content:space-between;align-items:baseline;padding:0 11px 8px;color:var(--text-dim)}
+  /* chat */
+  .chat{flex:1;padding:10px 13px;overflow-y:auto;font-size:12.5px}
+  .chat p{margin:0 0 7px}
+  .sys{color:var(--text-dim)}
+  .u{color:var(--accent)}
+  .a{color:var(--text)}
+  .think{color:#8a7ad8;background:rgba(138,122,216,.07);border-left:2px solid #5b4fa8;padding:5px 9px;margin-bottom:8px}
+  .tool{border:1px solid var(--accent-dim);background:rgba(53,208,224,.05);padding:5px 9px;margin-bottom:8px}
+  .tool .t{color:var(--accent)}
+  .tool .r{color:#57e08a}
+  .cursor{display:inline-block;width:7px;height:13px;background:var(--accent);vertical-align:-2px;animation:blink .9s step-end infinite}
+  @keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+  .chatfoot{border-top:1px dashed var(--line);padding:5px 13px;font-size:11px;color:var(--text-dim);display:flex;gap:16px}
+  /* mood */
+  .charbox{padding:10px 0 4px;text-align:center}
+  pre.art{margin:0;display:inline-block;font-size:14px;line-height:14px;letter-spacing:0;font-family:var(--font)}
+  .moodname{text-align:center;font-size:14px;color:var(--accent);letter-spacing:1px}
+  .moodval{text-align:center;font-size:11px;color:var(--text-dim);margin-bottom:8px}
+  .chips{display:flex;flex-wrap:wrap;gap:4px;padding:0 11px 9px}
+  .chip{flex:1 1 auto;text-align:center;font-size:11px;padding:3px 6px;border:1px solid var(--line);color:var(--text-dim);cursor:pointer;user-select:none;white-space:nowrap}
+  .chip:hover{border-color:var(--accent-dim);color:var(--text)}
+  .chip.on{border-color:var(--accent);color:var(--accent);background:rgba(53,208,224,.08)}
+  .tip{font-size:11px;color:var(--text-dim);padding:0 11px 10px;border-top:1px dashed var(--line);padding-top:8px}
+  /* globe */
+  .globebox{flex:1;display:flex;align-items:center;justify-content:center;min-height:0;padding:8px;position:relative}
+  canvas.globe{image-rendering:pixelated;cursor:grab}
+  canvas.globe.grabbing{cursor:grabbing}
+  .globeinfo{display:flex;justify-content:space-between;font-size:11px;color:var(--text-dim);padding:0 11px 9px;border-top:1px dashed var(--line);padding-top:7px}
+  .globeinfo b{color:var(--text);font-weight:400}
+  .foot{display:flex;align-items:center;gap:12px;padding:0 14px;border-top:1px solid var(--line);background:rgba(5,12,20,.86);font-size:12px}
+  .prompt{color:var(--accent)}
+  .keys{color:var(--text-dim);font-size:11px;margin-left:auto;letter-spacing:1px}
+  .keys kbd{border:1px solid var(--line);padding:0 5px;color:var(--text);font-family:var(--font);font-size:10px}
+  input.cmd{flex:1;background:transparent;border:0;outline:0;color:var(--text);font-family:var(--font);font-size:12.5px;caret-color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="bar">
+    <div class="logo"><b>▚</b>PONKO HUD</div>
+    <div class="tabs">
+      <div class="tab on">AGENT</div>
+      <div class="tab">SHELL</div>
+      <div class="tab">FILES</div>
+      <div class="tab">MOOD</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="meta">
+      <span><span class="dot"></span>local · qwen3-8b</span>
+      <span id="host">ds-whale @ win32</span>
+      <span>uptime 04:12:31</span>
+      <span id="clock">--:--:--</span>
+    </div>
+  </div>
+
+  <div class="main">
+
+    <div class="col" id="pLeft" style="width:236px;flex:none">
+      <div class="panel">
+        <div class="ph">SYS<span>live</span></div>
+        <div class="pb">
+          <div class="row"><i>CPU</i><span>47%</span></div>
+          <div class="bar-track"><div class="bar-fill" style="width:47%"></div></div>
+          <div class="row"><i>MEM</i><span>6.2 / 16 GB</span></div>
+          <div class="bar-track"><div class="bar-fill" style="width:39%"></div></div>
+          <div class="row"><i>GPU</i><span>61%</span></div>
+          <div class="bar-track"><div class="bar-fill warn" style="width:61%"></div></div>
+          <div class="row"><i>DISK</i><span>78%</span></div>
+          <div class="bar-track"><div class="bar-fill crit" style="width:78%"></div></div>
+          <div class="sep"></div>
+          <div class="kv"><span>NET ↑</span><b>1.2 MB/s</b></div>
+          <div class="kv"><span>NET ↓</span><b>8.4 MB/s</b></div>
+        </div>
+      </div>
+
+      <div class="panel" style="flex:1;min-height:0">
+        <div class="ph">GLOBE<span id="globestat">自转 45s/圈</span></div>
+        <div class="globebox" id="globebox"><canvas class="globe" id="globe"></canvas></div>
+        <div class="globeinfo">
+          <span>NETLINK</span>
+          <b><span id="arcsN">5</span> arcs · <span id="nodesN">8</span> nodes</b>
+        </div>
+      </div>
+    </div>
+
+    <div class="split" id="s1"></div>
+
+    <div class="col" style="flex:1;min-width:0">
+      <div class="panel" style="flex:1;min-height:0">
+        <div class="ph">SHELL<span>pwsh · C:\NetGateBuild</span></div>
+        <div class="term">
+          <p>PS C:\Users\Administrator&gt; cd C:\NetGateBuild</p>
+          <p>PS C:\NetGateBuild&gt; .\gradlew assembleDebug --console=plain</p>
+          <p class="warn">&gt; Task :app:assembleDebug FAILED</p>
+          <p class="warn">BUILD FAILED in 1m 12s · 14 actionable tasks</p>
+        </div>
+        <div class="cmdline">
+          <span class="ps">PS C:\NetGateBuild&gt;</span>
+          <input class="cmd" placeholder="输入命令，回车执行" spellcheck="false">
+          <span class="cursor"></span>
+        </div>
+      </div>
+
+      <div class="panel" style="flex:1;min-height:0">
+        <div class="ph">AGENT<span id="ctx">ctx 12%</span></div>
+      <div class="chat">
+        <p class="sys">● agent online · 工具 5 个 · 记忆库 已挂载</p>
+        <p class="u">› 帮我看下今天的 Gradle 构建为什么失败</p>
+        <div class="think">◐ thinking… 33s · 已读 build.log</div>
+        <div class="tool">
+          <div class="t">⚙ tool_call → read_file("build.log")</div>
+          <div class="r">✓ 412 行 · :app:assembleDebug FAILED</div>
+        </div>
+        <p class="a">问题出在路径非 ASCII 上。AGP 的 path check 在解析
+        <span style="color:#e0a04a">C:\Users\Administrator\WorkBuddy\智能Agent</span>
+        时直接抛错，和依赖、JDK 版本都无关。</p>
+        <p class="a">两个改法：<br>
+        1. 复制到 <span class="u">C:\NetGateBuild</span> 再构建（你之前验证过可行）<br>
+        2. 在 gradle.properties 里加 <span class="u">android.overridePathCheck=true</span>，但会带警告<span class="cursor"></span></p>
+        <p class="sys" id="streamline">▌ 流式输出中 · 3.2 tok/s</p>
+      </div>
+      <div class="chatfoot">
+        <span id="footstate">状态：待机</span>
+        <span>tokens 1,204</span>
+        <span>费用 ¥0.00（本地）</span>
+      </div>
+      </div>
+    </div>
+
+    <div class="split" id="s2"></div>
+
+    <div class="col" id="pRight" style="width:306px;flex:none">
+      <div class="panel" style="flex:1;min-height:0">
+        <div class="ph">DS · MOOD<span>方块字符</span></div>
+        <div class="charbox"><pre class="art" id="art"></pre></div>
+        <div class="moodname" id="moodname">平静 · 待机</div>
+        <div class="moodval" id="moodval">mood 62 / 100</div>
+        <div class="moodhist"><span>情绪历史</span><span class="spark" id="spark">▁▂▂▃▂▂▃▃▂▃</span></div>
+        <div class="chips" id="chips">
+          <div class="chip on" data-s="idle">待机</div>
+          <div class="chip" data-s="think">思考</div>
+          <div class="chip" data-s="stream">输出</div>
+          <div class="chip" data-s="sleepy">瞌睡</div>
+          <div class="chip" data-s="error">出错</div>
+        </div>
+        <div class="tip" id="tip">连续 8 分钟无输入，进入低功耗待机</div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="foot">
+    <span class="prompt">▚</span>
+    <span style="color:var(--text-dim)">SHELL 面板 = 命令输入 · AGENT 面板 = 对话输入</span>
+    <span class="keys"><kbd>TAB</kbd> 切换 <kbd>^P</kbd> 命令 <kbd>ESC</kbd> 中断 <kbd>^M</kbd> 心情 <kbd>拖拽│</kbd> 调列宽 <kbd>拖地球</kbd> 转视角</span>
+  </div>
+
+</div>
+
+<script>
+/*PIXEL-BEGIN*/
+const W = 22, H = 30, BG = '#0b1a26';
+const P = {
+  hair:'#3f6fd8', hi:'#7aa6ff', dark:'#2a4e9e',
+  skin:'#f6cfb5', sh:'#e3b096',
+  eye:'#12305c', white:'#ffffff', blush:'#f19a9a',
+  dress:'#3a6bd0', apron:'#eef4ff', sock:'#e8eff8', shoe:'#1e3a6e',
+  fin:'#6a9cf0', zzz:'#93bcff', spark:'#ffe08a', tear:'#8fd8ff', mouth:'#8a4a52'
+};
+function build(st){
+  const g=[]; for(let y=0;y<H;y++) g.push(new Array(W).fill(BG));
+  const set=(x,y,c)=>{ x=Math.round(x); y=Math.round(y); if(x>=0&&x<W&&y>=0&&y<H) g[y][x]=c; };
+  const ell=(cx,cy,rx,ry,c,f)=>{
+    for(let y=Math.floor(cy-ry);y<=Math.ceil(cy+ry);y++)
+      for(let x=Math.floor(cx-rx);x<=Math.ceil(cx+rx);x++){
+        const dx=(x-cx)/rx, dy=(y-cy)/ry;
+        if(dx*dx+dy*dy<=1 && (!f||f(x,y))) set(x,y,c);
+      }
+  };
+  for(let y=7;y<=21;y++){ set(2,y,P.hair); set(3,y,P.hair); set(18,y,P.hair); set(19,y,P.hair); }
+  for(let y=9;y<=21;y+=4){ set(3,y,P.hi); set(18,y,P.hi); }
+  set(3,22,P.dark); set(18,22,P.dark);
+  set(11,1,P.hi); set(11,2,P.hi); set(11,3,P.hi); set(10,2,P.hi);
+  for(let i=0;i<5;i++){ set(16+i,5+i,P.fin); set(17+i,5+i,P.fin); }
+  ell(11,10.5,7,6.5,P.hair);
+  ell(11,8.6,6.2,4.4,P.hi,(x,y)=> y<9 && x<14 && x>8);
+  ell(11,11.6,4.7,4.5,P.skin);
+  ell(11,10.5,7,6.5,P.hair,(x,y)=> y<=9);
+  ell(11,10.5,7,6.5,P.hair,(x,y)=> y>9 && (x<=5 || x>=17));
+  const eyeL=8.5, eyeR=13.5;
+  if(st==='sleepy'){
+    for(let x=eyeL-1.5;x<=eyeL+1.5;x++) set(x,12,P.eye);
+    for(let x=eyeR-1.5;x<=eyeR+1.5;x++) set(x,12,P.eye);
+  } else if(st==='error'){
+    [-1,0,1].forEach(d=>{ set(eyeL-1+d,12+(d===0?-1:0),P.eye); set(eyeR-1+d,12+(d===0?-1:0),P.eye); });
+  } else if(st==='think'){
+    ell(eyeL,11.6,1.7,1.9,P.eye);
+    for(let x=eyeR-1.5;x<=eyeR+1.5;x++) set(x,12,P.eye);
+  } else {
+    const r = st==='stream' ? 2.05 : 1.7;
+    ell(eyeL,11.6,r,r*1.15,P.eye); ell(eyeR,11.6,r,r*1.15,P.eye);
+    set(eyeL-0.6,11,P.white); set(eyeR-0.6,11,P.white);
+  }
+  if(st==='idle'||st==='stream'){ set(7,13.4,P.blush); set(15,13.4,P.blush); }
+  if(st==='stream'){ set(10,14,P.mouth); set(11,14,P.mouth); set(10,15,P.mouth); set(11,15,P.mouth); }
+  else if(st==='error'){ set(10,15,P.mouth); set(11,14.6,P.mouth); set(12,15,P.mouth); }
+  else { set(10,14,P.mouth); set(11,14,P.mouth); }
+  if(st==='sleepy'){ set(2,5,P.zzz); set(3,4,P.zzz); set(4,3,P.zzz); set(1,3,P.zzz); }
+  if(st==='think'){ set(18,13,P.spark); set(19,13,P.spark); set(20,13,P.spark); }
+  if(st==='stream'){ set(4,4,P.spark); set(20,16,P.spark); set(3,17,P.spark); }
+  if(st==='error'){ set(15,14,P.tear); set(15,15,P.tear); }
+  set(10,15,P.sh); set(11,15,P.sh); set(10,16,P.sh); set(11,16,P.sh);
+  for(let y=17;y<=25;y++){ const hw=Math.round(4+(y-17)*0.42); for(let x=11-hw;x<=11+hw;x++) set(x,y,P.dress); }
+  for(let y=18;y<=24;y++) for(let x=9;x<=13;x++) set(x,y,P.apron);
+  for(let x=9;x<=13;x++) set(x,17,P.apron);
+  set(6,18,P.dress); set(6,19,P.dress); set(5,20,P.skin); set(5,21,P.skin);
+  set(15,18,P.dress); set(15,19,P.dress); set(16,20,P.skin); set(16,21,P.skin);
+  for(let y=26;y<=27;y++){ set(9,y,P.sock); set(10,y,P.sock); set(12,y,P.sock); set(13,y,P.sock); }
+  for(let y=28;y<=29;y++){ set(9,y,P.shoe); set(10,y,P.shoe); set(12,y,P.shoe); set(13,y,P.shoe); }
+  return g;
+}
+/*PIXEL-END*/
+
+const STATES = {
+  idle:   {name:'平静 · 待机',  color:'#35d0e0', mood:62, sp:'▁▂▂▃▂▂▃▃▂▃', foot:'状态：待机',   line:'▌ 空闲 · 等待指令',        tip:'连续 8 分钟无输入，进入低功耗待机'},
+  think:  {name:'专注 · 思考中', color:'#ffb454', mood:78, sp:'▃▄▃▅▆▅▄▅▆▇', foot:'状态：思考中', line:'◐ 推理中 · 已调用 1 个工具', tip:'上下文 12% · 单轮思考 33s'},
+  stream: {name:'兴奋 · 输出中', color:'#57e08a', mood:88, sp:'▂▃▅▆▇█▇▆▇█', foot:'状态：输出中', line:'▌ 流式输出中 · 3.2 tok/s',  tip:'3.2 tok/s · 已输出 1,204 tokens'},
+  sleepy: {name:'困倦 · 打瞌睡', color:'#8b7ff0', mood:30, sp:'▅▄▃▂▂▁▁▁▂▁', foot:'状态：打瞌睡', line:'z Z z · 已 42 分钟空闲',    tip:'已 42 分钟空闲，建议丢点新任务给它'},
+  error:  {name:'沮丧 · 出错',  color:'#ff6b6b', mood:22, sp:'▆▅▇▆▅▃▂▁▁▁', foot:'状态：出错',   line:'! 上次构建失败 · 重试中', tip:'上一轮工具调用失败，心情回落'}
+};
+
+const art = document.getElementById('art');
+function render(state){
+  const g = build(state);
+  let html = '';
+  for(let y=0; y<H; y+=2){
+    for(let x=0; x<W; x++){
+      html += '<span style="color:'+g[y][x]+';background:'+g[y+1][x]+'">▀</span>';
+    }
+    html += '\n';
+  }
+  art.innerHTML = html;
+  const m = STATES[state];
+  document.documentElement.style.setProperty('--accent', m.color);
+  document.getElementById('moodname').textContent = m.name;
+  document.getElementById('moodval').textContent = 'mood ' + m.mood + ' / 100';
+  document.getElementById('tip').textContent = m.tip;
+  document.getElementById('spark').textContent = m.sp;
+  document.getElementById('footstate').textContent = m.foot;
+  document.getElementById('streamline').textContent = m.line;
+}
+
+document.getElementById('chips').addEventListener('click', e=>{
+  const chip = e.target.closest('.chip');
+  if(!chip) return;
+  document.querySelectorAll('.chip').forEach(c=>c.classList.remove('on'));
+  chip.classList.add('on');
+  render(chip.dataset.s);
+});
+
+function tick(){
+  const d = new Date();
+  const p = n => String(n).padStart(2,'0');
+  document.getElementById('clock').textContent = p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());
+}
+function makeDrag(split, panel, dir){
+  let sx=0, sw=0;
+  split.addEventListener('mousedown', e=>{ sx=e.clientX; sw=panel.offsetWidth; split.classList.add('active'); e.preventDefault(); });
+  window.addEventListener('mousemove', e=>{
+    if(split.classList.contains('active')) panel.style.width = Math.max(170, sw + (e.clientX - sx)*dir) + 'px';
+  });
+  window.addEventListener('mouseup', ()=> split.classList.remove('active'));
+}
+makeDrag(document.getElementById('s1'), document.getElementById('pLeft'), 1);
+makeDrag(document.getElementById('s2'), document.getElementById('pRight'), -1);
+
+/* ---- GLOBE：locationGlobe 的字符网格复刻（球面反投影 + 半块字符） ---- */
+const MASK_B64="////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/8wAAP///gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAv//4D/////no+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA+AD/x///////+AAAAAAAAAAAAAAAAAAPgAAAAAAAAAAAAAAAAAAAAAAAAAAA///+Af//////4AAAAAfHgAAAAAAAAAAD4AAAAAAAAAAAAAAAAAAAAAAAAADzH//5////////wAAAAAfsAAAAAAAAAAAAD4AAAAAAAAAAAAAAAAAAAAAAEYIABO/Ad///////+AAAAAOCAAAAAAAAAAAAAcAAAAAAAAAAAAAAAAAAAAAB9CAA69+AP///////8AAAAAAAAAAAAAA4AAAAB+8AAAAAAAAAAAAAAAAAAAAAX/4czj4AAAP/////uAAAAAAAAAAAADgAAAB////AAAB9oAAAAAAAAAAAAAAOAgAAAAAAAAH////+eAAAAAAAAAAAAOAAAAf////AAAAAAAAAAAAAAAAAAAAP+AYe+O9AAAD////v8AAAAAAAAAAAA4AAAH//////H4AGAAAAAAAAAAAAAAAfv+4/Q/9gAAD////6wAAAAAAAAAAABwAHln///////8AfwAAAAAwAAAAAAAAOP/8E4//9AADf////wAAAAAAAAAAADwAP/////////4///wAAAAAAAP8AAAEAHf+B8f//YAA////+wAAAAAAD/gAAAcA///////////////8AAAAAB///+f/3H//D+Dzf4AB3///8AAAAAAB//4AAQA+fv///////////////v8wAP////////R8D/z5P+AAf//zAAAAAAAP///wMH//3+/////////////////+AD/////+///////4f/wA///wAAAAAAAP///+P////v//////////////////4E//////8//////gjv+A///gAAAAAAAf//5+P//////////////////////74///////4/////7A/+YAf/wAA/8AAAA/8f+D///////////////////////AwIf///////////zw//gAP/gAAP8AAAD/4/+f//////////////////////+AMH///////////+HIA/wAP/gAADAAAAP/z/////////////////////////+AAf///////////8AwgHAAD/AAAAAAAA//H/////////////////////////7AAf///////9///wAA/AAAB+AAAAAAAB/+H/O////////////////////jv+AAAP//z////////wAA/4AAAOAAAAAAAB//H/n////////////////////A/8AAAR/bAD////9//gAA/4wAAAAAAAAAAB//g7///////////////////++DgAAAAAD0AAf//////4AA/94AAAAAAAAAYA52D7/3////////////////4AAHAAAAAADcAAP////+/8AAf/8AAAAAAAAD8AC+i///////////////////wAAfgAAAAAMAAAD///////wCf/+AAAAAAAAA8AOeH///////////////////AAA/gAAAABwAAAD///////+Af//AAAAAAAAA8APQH//////////////v///8AAA/AAAAAEAAAAAf///////z///4AAAAAAAHuANRv//////////////v///+AAA/AAAAAQAAAABf///////x///8AAAAAAAPHg/////////////////f////6AA8AAAAAAAAAAAn///////5///8AAAAAAAPPx////////////////9/////+AA4AAAAAAAAAAAD///////////4AAAAAAAAP3///////////////9//////6AAgAAAAAAAAAAAD///////////kAAAAAAAAQf//////////////////////7AAAAAAAAAAAAAABv/////v//+MPAAAAAAAAC///////////////////////7AAAAAAAAAAAAAAAf/////z///wfgAAAAAAAf///////////////////////yAAAAAAAAAAAAAAAP////+B///gDgAAAAAAAH///////////////////////iAAAAAAAAAAAAAAAP/////////pAAAAAAAAAD/////vv////////////////DAAAAAAAAAAAAAAAP/////5H//+AAAAAAAAAB//v//H//f/////////////+AAAAAAAAAAAAAAAAP/////7n/+4AAAAAAAAAB//H/+AP/P/////////////8CAAAAAAAAAAAAAAAP/////z8fwAAAAAAAAADj/jz/8AD/H/////////////4HwAAAAAAAAAAAAAAP/////zx/gAAAAAAAAAH/4Bw/8AB/B///+////////+ADAAAAAAAAAAAAAAAP//////v/wAAAAAAAAAH/4A8f8PB/g////////////8AAAAAAAAAAAAAAAAAP///////8AAAAAAAAAAH/gMHfJ///x////////////4AMAAAAAAAAAAAAAAAP///////8AAAAAAAAAAH/IMCOP///x///////////ZwAMAAAAAAAAAAAAAAAH///////4AAAAAAAAAAH/AACHH///g///////////BwAMAAAAAAAAAAAAAAAH///////wAAAAAAAAAAH+AAYGH///x///////////44CYAAAAAAAAAAAAAAAD///////wAAAAAAAAAAAgf+AABs//////////////g4D4AAAAAAAAAAAAAAAB///////4AAAAAAAAAAAh/+AAgE//////////////A4f4AAAAAAAAAAAAAAAB///////gAAAAAAAAAAB//+AAAA//////////////Ax2AAAAAAAAAAAAAAAAAP/////+AAAAAAAAAAAD//+AAAB//////////////wjwAAAAAAAAAAAAAAAAAH/////8AAAAAAAAAAAH///4OAB//////////////wDAAAAAAAAAAAAAAAAAAH/////4AAAAAAAAAAAP///8P4T//////////////wCAAAAAAAAAAAAAAAAAACf////4AAAAAAAAAAAP////v////////////////4AAAAAAAAAAAAAAAAAAAB///zgYAAAAAAAAAAAP/////////n///////////wAAAAAAAAAAAAAAAAAAAAv//AAYAAAAAAAAAAAf/////////n///////////wAAAAAAAAAAAAAAAAAAAB3/+AAcAAAAAAAAAAB///////8//z///////////gAAAAAAAAAAAAAAAAAAAAb/+AAMgAAAAAAAAAD///////8//4X//////////AAAAAAAAAAAAAAAAAAAAAJ/+AANAAAAAAAAAAH///////+f/0T//////////AAAAAAAAAAAAAAAAAAAAAI/8AABAAAAAAAAAAH///////+f/94Af///////+QAAAAAAAAAAAAAAAAAAAACf8AAAoAAAAAAAAAP////////P//+AP///////4wAAAAAAAAAAAAAAAAAAAAAP8AAvAAAAAAAAAAf////////n///AH///////AgAAAAAAAAAAAAAAAAAAAAAH+AYTgAAAAAAAAAf////////n//+AD///P//+AAAAAAAAAAAAAAAAAAAAAAAH+B4AYAAAAAAAAAf////////j//+AA//4P/+IAAAAAAAAAAAAAAAgAAAAAAAH/B4ABwAAAAAAAAf////////h//8AAf/gD/8YAAAAAAAAAAAAAAAAAAAAAAAD/nwAH9AAAAAAAAP////////x//4AAf/AD/8QAAAAAAAAAAAAAAAAAAAAAAAAf/wAAAAAAAAAAAP////////4//gAAf+AB/+AAwAAAAAAAAAAAAAAAAAAAAAAH/wAAAAAAAAAAAf////////4/+AAAf8AD//AAwAAAAAAAAAAAAAAAAAAAAAAAP/AAAAAAAAAAAf////////+f8AAAP4AAP/gAwAAAAAAAAAAAAAAAAAAAAAAAD/gAAAAAAAAAAf////////+fgAAAPwAAP/gAwAAAAAAAAAAAAAAAAAAAAAAAA/gAAAAAAAAAAf/////////eAAAAHwAAP/gAsAAAAAAAAAAAAAAAAAAAAAAAAHgAAAAAAAAAAf/////////gBAAAHwAAM/gAGAAAAAAAAAAAAAAAAAAAAAAAADABoAAAAAAAAf/////////gIAAADwAAMfgALAAAAAAAAAAAAAAAAAAAAAAAADgP/OAAAAAAAH//////////4AAADwAAIPABAAAAAAAAAAAAAAAAAAAAAAAAABwPf+AAAAAAAD//////////4AAAD4AAIGACJAAAAAAAAAAAAAAAAAAAAAAAAA9///AAAAAAAB//////////wAAABIAAMAAEHAAAAAAAAAAAAAAAAAAAAAAAAAE///wAAAAAAB//////////wAAAAMAAGAAALgAAAAAAAAAAAAAAAAAAAAAAAAAf//4AAAAAAAf/////////gAAAAMAADAAMDAAAAAAAAAAAAAAAAAAAAAAAAAA////gAAAAAAP/B///////gAAAAAABDgAeAAAAAAAAAAAAAAAAAAAAAAAAAAAf///4AAAAAACAA3//////AAAAAAAAzwA+AAAAAAAAAAAAAAAAAAAAAAAAAAAf///4AAAAAAAAAL/////+AAAAAAAAZwB8AAAAAAAAAAAAAAAAAAAAAAAAAAA////8AAAAAAAAAD/////8AAAAAAAAPwH8AIAAAAAAAAAAAAAAAAAAAAAAAAB////+AAAAAAAAAH/////4AAAAAAAAHwf8AYAAAAAAAAAAAAAAAAAAAAAAAAD/////AAAAAAAAAH/////gAAAAAAAAH4f80IAAAAAAAAAAAAAAAAAAAAAABAH/////gAAAAAAAAH///z/gAAAAAAAAD4f8ASgAAAAAAAAAAAAAAAAAAAAAAAH/////8AAAAAAAAH///z/AAAAAAAAAB8P5wRwAAAAAAAAAAAAAAAAAAAAAAAH/////+AAAAAAAAD////+AAAAAAAAAB+P5wAT4AAAAAAAAAAAAAAAAAAAAAAH//////4AAAAAAAB////8AAAAAAAAAA+C5Qqf/AAAAAAAAAAAAAAAAAAAAAAH//////8AAAAAAAA//+/8AAAAAAAAAAcAAQAH/gAAAAAAAAAAAAAAAAAAAAAH///////gAAAAAAA//+/4AAAAAAAAAAMABAAI/xwAAAAAAAAAAAAAAAAAAAAH///////gAAAAAAA////8AAAAAAAAAADgAAAI/8BAAAAAAAAAAAAAAAAAAAAD///////gAAAAAAAf//f4AAAAAAAAAAB+AABA/4AAAAAAAAAAAAAAAAAAAAAB///////gAAAAAAAf///8AAAAAAAAAAAAu5gAPMACAAAAAAAAAAAAAAAAAAAA///////AAAAAAAAf///8AAAAAAAAAAAABCAACHgGAAAAAAAAAAAAAAAAAAAA///////AAAAAAAAP//9+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/////+AAAAAAAAP//9+AAAAAAAAAAAAAADgCAAAAAAAAAAAAAAAAAAAAAAAf/////8AAAAAAAAf//9+AQAAAAAAAAAAAAD+CAAAAAAAAAAAAAAAAAAAAAAAP/////4AAAAAAAAf//9+AwAAAAAAAAAAAAD8HAAAAAAAAAAAAAAAAAAAAAAAP/////4AAAAAAAA////+AwAAAAAAAAAAAB/8HgAAAAAAAAAAAAAAAAAAAAAAH3////4AAAAAAAA////+DwAAAAAAAAAAAD/+HwAAAAAAAAAAAAAAAAAAAAAAB/////4AAAAAAAA////8PwAAAAAAAAAAAH//HwAABABAAAAAAAAAAAAAAAAAAf////4AAAAAAAA////wPwAAAAAAAAAAAP///wAAAAAAAAAAAAAAAAAAAAAAAP////wAAAAAAAA////gPgAAAAAAAAAAAP///wAAAAAAAAAAAAAAAAAAAAAAAP////wAAAAAAAAf///APgAAAAAAAAAAAf///8AAAAAAAAAAAAAAAAAAAAAAAP////wAAAAAAAAf//+APgEAAAAAAAAAD////+AAIAAAAAAAAAAAAAAAAAAAAP////gAAAAAAAAP//+AfAAAAAAAAAAAf////+AAEAAAAAAAAAAAAAAAAAAAAP////AAAAAAAAAP///AfAAAAAAAAAAA//////gAAAAAAAAAAAAAAAAAAAAAAf///4AAAAAAAAAP///APAAAAAAAAAAA//////gAAAAAAAAAAAAAAAAAAAAAAP///gAAAAAAAAAH//+AOAAAAAAAAAAB//////wAAAAAAAAAAAAAAAAAAAAAAf///AAAAAAAAAAH//4AEAAAAAAAAAAB//////4AAAAAAAAAAAAAAAAAAAAAAf//+AAAAAAAAAAH//4AAAAAAAAAAAAB//////4AAAAAAAAAAAAAAAAAAAAAAf///AAAAAAAAAAH//4AAAAAAAAAAAAA//////4AAAAAAAAAAAAAAAAAAAAAAf//+AAAAAAAAAAD//wAAAAAAAAAAAAA//////8AAAAAAAAAAAAAAAAAAAAAAf//8AAAAAAAAAAB//gAAAAAAAAAAAAAf/////4AAAAAAAAAAAAAAAAAAAAAA///8AAAAAAAAAAB//gAAAAAAAAAAAAAf/////4AAAAAAAAAAAAAAAAAAAAAA///4AAAAAAAAAAA//AAAAAAAAAAAAAAP/////4AAAAAAAAAAAAAAAAAAAAAA///wAAAAAAAAAAA/+AAAAAAAAAAAAAAP/AP//wAAAAAAAAAAAAAAAAAAAAAA///gAAAAAAAAAAA/4AAAAAAAAAAAAAAf8AH//wAAAAAAAAAAAAAAAAAAAAAA///AAAAAAAAAAAAYAAAAAAAAAAAAAAAOAAF//gAAAAAAAAAAAAAAAAAAAAAB//4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//AAABAAAAAAAAAAAAAAAAAAB//4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/AAAAgAAAAAAAAAAAAAAAAAD//4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/AAAAQAAAAAAAAAAAAAAAAAB//wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABYAAAA8AAAAAAAAAAAAAAAAAB/8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4AAAAAAAAAAAAAAAAAD/8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAYAAAAAAAAAAAAAAAAAD/gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcAAADAAAAAAAAAAAAAAAAAAD/4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcAAAHAAAAAAAAAAAAAAAAAAB/gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAOAAAAAAAAAAAAAAAAAAH/gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4AAAAAAAAAAAAAAAAAAH+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4AAAAAAAAAAAAAAAAAAO8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAAAAAAAAAAAG/gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD8AAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH4AwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAXAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/AAAAAAAAAAAAAAAAAAf4AAAAOBQANAOk1AAAAAAAAAAAAAAAAAAAAAAAAAD+AAAAAAAAAAAAAAAAAB3/0AAA//4AAAB/d/wAAAAAAAAAAAAAAAAAAAAAAAB/gAAAAAAAAAAAAAAAAfv/+cAf//2IACD/f/8AAAAAAAAAAAAAAAAAAAAAAAj+AAAAAAAAAAAAAAAyAv///7x///+EAD//////4AAAAAAAAAAAAAAAAAAAAD//AAAAAAAAB//+V////P///7////+AAD///////gAAAAAAAAAAAAAAAAAAAB//AAAAAAAA5+f/P/3/X/////f///+G8f////////gAAAAAAAAAAAAAA/AAAB//AAAAAAAff///79/+Y////4/////+f/////////wAAAAAAAAABAAAAv/+G///AAAAAAD/////////f///4X///////////////8AAAAAAAAAAf//gAf/////+AAAAAB/3/////////////r///////////////4AAAAAAAB////7/nj//////gAAAAB//////////////////////////////4gAAAAAAA/////////////9//gAAACfH/////////////9//////////////8AAAAAAD////8P///////33/wCAAB98/////////////////////////////8CvA/8D///8MBA/////9/57w8AcAfB///////////////////////////////n//////ge/Af///////+QAAAIOZ9f//x///////////////////////////////A/5+H///j///////4AHANAcfAAE3////////////////////////////g//4AAYKH///gD////////wAAAfgAAAf//////////////////////////+J3gf4AAAAAf/8AB///////5AAAHAB9//////////////////////////////+QAAAAAAAAAAAAA///////wAAA/wAb///u///////////////////////9///r8AwAAAAAAAAAMBbj///+AAAAf/QB///////////////////////+f//////+AAOgcjAAAAAAOB////f/+gHH////3///////////////////////////////EgPP/gDAAT/9f///////wAP///////////////////////////////////////4/////////////////////////////+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////";
+const Globe=(function(){
+  const ARCS=[[39.90,116.40,37.77,-122.42],[51.51,-0.13,1.35,103.82],[35.68,139.69,-33.87,151.21],
+              [52.52,13.40,40.71,-74.01],[22.30,114.17,51.51,-0.13]];
+  const NODES=[[39.90,116.40],[51.51,-0.13],[1.35,103.82],[40.71,-74.01],
+               [37.77,-122.42],[-33.87,151.21],[52.52,13.40],[22.30,114.17]];
+  const rad=d=>d*Math.PI/180, deg=r=>r*180/Math.PI;
+  function w(lat,lon){const la=rad(lat),lo=rad(lon);
+    return [Math.cos(la)*Math.sin(lo),Math.sin(la),Math.cos(la)*Math.cos(lo)];}
+  // ---- 海陆位图（360x180 bit，MSB 在左，row0=北纬90）
+  const bin=atob(MASK_B64), M=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)M[i]=bin.charCodeAt(i);
+  function isLand(lat,lon){
+    let c=Math.floor((lon+180)/360*360)%360; if(c<0)c+=360;
+    let r=Math.floor((90-lat)/180*180); r=r<0?0:(r>179?179:r);
+    const i=r*360+c; return (M[i>>3]>>(7-(i&7)))&1;
+  }
+  function toView(x,y,z,yaw,pitch){
+    const a=rad(-yaw),ca=Math.cos(a),sa=Math.sin(a);
+    const x1=x*ca+z*sa,z1=-x*sa+z*ca;
+    const cp=Math.cos(rad(pitch)),sp=Math.sin(rad(pitch));
+    return [x1,y*cp-z1*sp,y*sp+z1*cp];
+  }
+  function unproject(sx,sy,yaw,pitch){
+    const r2=sx*sx+sy*sy; if(r2>1)return null;
+    const sz=Math.sqrt(1-r2);
+    const cp=Math.cos(rad(pitch)),sp=Math.sin(rad(pitch));
+    const y1=sy*cp+sz*sp,z1=-sy*sp+sz*cp;
+    const b=rad(yaw),x0=sx*Math.cos(b)+z1*Math.sin(b),z0=-sx*Math.sin(b)+z1*Math.cos(b);
+    return [deg(Math.asin(Math.max(-1,Math.min(1,y1)))),deg(Math.atan2(x0,z0)),sz];
+  }
+  // 弧线预采样（世界坐标，抬升量随球面距离变化）
+  const arcPts=ARCS.map((a,ai)=>{
+    const p=w(a[0],a[1]),q=w(a[2],a[3]);
+    const dot=Math.max(-1,Math.min(1,p[0]*q[0]+p[1]*q[1]+p[2]*q[2]));
+    const ang=Math.acos(dot);
+    const m=[p[0]+q[0],p[1]+q[1],p[2]+q[2]];
+    const n=Math.hypot(m[0],m[1],m[2])||1;
+    const L=1.05+0.45*ang/Math.PI;
+    const c=[m[0]/n*L,m[1]/n*L,m[2]/n*L];
+    const pts=[];
+    for(let i=0;i<=160;i++){const t=i/160,u=1-t;
+      pts.push([u*u*p[0]+2*u*t*c[0]+t*t*q[0],u*u*p[1]+2*u*t*c[1]+t*t*q[1],
+                u*u*p[2]+2*u*t*c[2]+t*t*q[2],t]);}
+    return pts;
+  });
+  const lerpC=(a,b,t)=>[a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t,a[2]+(b[2]-a[2])*t];
+  const hex=h=>{h=(h||'').trim().replace('#','');
+    return [parseInt(h.substr(0,2),16)||80,parseInt(h.substr(2,2),16)||208,parseInt(h.substr(4,2),16)||224];};
+  const cv=document.getElementById('globe'),box=document.getElementById('globebox');
+  const ctx=cv.getContext('2d');
+  const SEA=[14,52,84],SEAL=[30,104,148],GRID=[44,150,180],
+        ARC=[240,222,96],ARCD=[150,138,60],NODE=[255,92,92];
+  let cols=0,rows=0,img=null;
+  let yaw=116,pitch=18,dragging=false,lx=0,ly=0,last=0;
+  function fit(){
+    const s=Math.max(96,Math.min(box.clientWidth-18,box.clientHeight-18));
+    const side=Math.max(64,Math.floor(s/8)*8);
+    cols=side/4;rows=side/8;
+    cv.width=cols*4;cv.height=rows*8;
+    img=ctx.createImageData(cv.width,cv.height);
+  }
+  function draw(now){
+    const dt=Math.min(0.1,(now-last)/1000||0);last=now;
+    if(!dragging)yaw=(yaw+8*dt)%360;              // 45s 一圈，同 eDEX dayLength
+    const acc=hex(getComputedStyle(document.documentElement).getPropertyValue('--accent'));
+    const landDim=[acc[0]*0.22|0,acc[1]*0.22|0,acc[2]*0.22|0];
+    const d=img.data,W4=cv.width;
+    for(let i=3;i<d.length;i+=4)d[i]=0;
+    const put=(px,py,c)=>{const x0=px*4,y0=py*4;
+      for(let yy=0;yy<4;yy++){let o=(y0+yy)*W4*4+x0*4;
+        for(let xx=0;xx<4;xx++){d[o]=c[0];d[o+1]=c[1];d[o+2]=c[2];d[o+3]=255;o+=4;}}};
+    const top=new Array(cols*rows),bot=new Array(cols*rows);
+    for(let cy=0;cy<rows;cy++)for(let cx=0;cx<cols;cx++){
+      let up=null,dn=null;
+      for(let half=0;half<2;half++){
+        const j=cy*2+half;
+        const sx=(cx+0.5)/cols*2-1, sy=1-(j+0.5)/(rows*2)*2;
+        const hit=unproject(sx,sy,yaw,pitch);
+        if(!hit)continue;
+        const light=0.22+0.78*Math.pow(hit[2],0.85);
+        let c;
+        if(isLand(hit[0],hit[1])) c=lerpC(landDim,acc,light);
+        else{
+          c=lerpC(SEA,SEAL,light);
+          const dla=Math.abs(((hit[0]+90)%30)-15),dlo=Math.abs(((hit[1]+180)%30)-15);
+          if(dla>13.7||dlo>13.7)c=lerpC(c,GRID,0.85);   // 经纬网
+        }
+        if(half===0)up=c;else dn=c;
+      }
+      top[cy*cols+cx]=up;bot[cy*cols+cx]=dn;
+    }
+    const T=now/1000;
+    arcPts.forEach((pts,ai)=>{
+      for(const p of pts){
+        const v=toView(p[0],p[1],p[2],yaw,pitch);
+        if(v[2]<=0.02)continue;
+        const px=Math.floor((v[0]+1)/2*cols),py=Math.floor((1-v[1])/2*rows*2);
+        if(px<0||px>=cols||py<0||py>=rows*2)continue;
+        const r=py>>1,k=cols*r+px;
+        if(top[k]==null&&bot[k]==null)continue;
+        const beat=0.5+0.5*Math.sin(ai*1.7+8*Math.PI*(p[3]-0.5)+T*2);
+        const c=beat>0.35?ARC:ARCD;
+        if(py%2===0){top[k]=c;if(bot[k]==null)bot[k]=c;}
+        else{bot[k]=c;if(top[k]==null)top[k]=c;}
+      }
+    });
+    for(const n of NODES){
+      const v=toView(w(n[0],n[1])[0],w(n[0],n[1])[1],w(n[0],n[1])[2],yaw,pitch);
+      if(v[2]<=0.02)continue;
+      const px=Math.max(0,Math.min(cols-1,Math.floor((v[0]+1)/2*cols)));
+      const py=Math.max(0,Math.min(rows*2-1,Math.floor((1-v[1])/2*rows*2)));
+      const k=cols*(py>>1)+px;
+      if(top[k]==null&&bot[k]==null)continue;
+      top[k]=NODE;bot[k]=NODE;
+    }
+    for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){
+      const t=top[r*cols+c],b=bot[r*cols+c];
+      if(t)put(c,r*2,t);
+      if(b)put(c,r*2+1,b);
+    }
+    ctx.putImageData(img,0,0);
+    requestAnimationFrame(draw);
+  }
+  cv.addEventListener('mousedown',e=>{dragging=true;lx=e.clientX;ly=e.clientY;
+    cv.classList.add('grabbing');document.getElementById('globestat').textContent='手动 · 拖拽中';e.preventDefault();});
+  window.addEventListener('mousemove',e=>{
+    if(!dragging)return;
+    yaw+=(e.clientX-lx)*0.45;
+    pitch=Math.max(-60,Math.min(70,pitch-(e.clientY-ly)*0.35));
+    lx=e.clientX;ly=e.clientY;});
+  window.addEventListener('mouseup',()=>{if(!dragging)return;dragging=false;
+    cv.classList.remove('grabbing');document.getElementById('globestat').textContent='自转 45s/圈';});
+  window.addEventListener('resize',fit);
+  fit();
+  requestAnimationFrame(t=>{last=t;draw(t);});
+  return {};
+})();
+
+tick(); setInterval(tick, 1000);
+
+const q = new URLSearchParams(location.search).get('mood');
+const start = q && STATES[q] ? q : 'idle';
+if(start !== 'idle'){
+  document.querySelectorAll('.chip').forEach(c=>c.classList.toggle('on', c.dataset.s===start));
+}
+render(start);
+</script>
+</body>
+</html>

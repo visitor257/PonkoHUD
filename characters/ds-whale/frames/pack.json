@@ -1,0 +1,46 @@
+{
+  "id": "ds-whale",
+  "name": "ds-whale",
+  "grid": {
+    "cols": 48,
+    "rows": 32,
+    "charset": "block"
+  },
+  "moods": {
+    "error": {
+      "frames": [
+        "error.ans"
+      ],
+      "fps": 0,
+      "loop": false
+    },
+    "idle": {
+      "frames": [
+        "idle.ans"
+      ],
+      "fps": 0,
+      "loop": false
+    },
+    "sleepy": {
+      "frames": [
+        "sleepy.ans"
+      ],
+      "fps": 0,
+      "loop": false
+    },
+    "streaming": {
+      "frames": [
+        "streaming.ans"
+      ],
+      "fps": 0,
+      "loop": false
+    },
+    "thinking": {
+      "frames": [
+        "thinking.ans"
+      ],
+      "fps": 0,
+      "loop": false
+    }
+  }
+}

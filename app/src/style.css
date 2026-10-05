@@ -1,0 +1,29 @@
+html, body {
+  margin: 0; padding: 0; height: 100%; overflow: hidden;
+  background: #080c10;
+  font-family: "Cascadia Mono", Consolas, "DejaVu Sans Mono", monospace;
+}
+#screen {
+  display: block;
+  width: 100vw; height: 100vh;
+  cursor: default;
+  user-select: none;
+}
+/* 隐藏输入线：透明但可聚焦，位置由 JS 对齐到当前输入行 */
+#hidden-input {
+  position: fixed;
+  left: 0; top: 0; width: 10px; height: 16px;
+  opacity: 0;
+  border: 0; outline: 0; padding: 0; margin: 0;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  font-family: inherit;
+  z-index: 10;
+}
+#boot {
+  display: none;
+  position: fixed; left: 12px; bottom: 12px;
+  color: #f05c5c; font-size: 13px;
+  background: #0c1218; padding: 6px 10px; border: 1px solid #22343e;
+}

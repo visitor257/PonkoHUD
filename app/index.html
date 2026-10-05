@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Ponko HUD</title>
+<link rel="stylesheet" href="src/style.css">
+</head>
+<body>
+  <canvas id="screen"></canvas>
+  <!-- 隐藏输入线：承接键盘与中文 IME（Canvas 自己接不了输入法），定位到当前输入行 -->
+  <input id="hidden-input" autocomplete="off" spellcheck="false">
+  <div id="boot">初始化…</div>
+  <script type="module" src="src/main.js"></script>
+  <script>
+    // 模块加载失败时给个可见提示，别白屏
+    window.addEventListener('error', (e) => {
+      const b = document.getElementById('boot');
+      if (b) { b.style.display = 'block'; b.textContent = '启动失败：' + (e.message || e.error); }
+    });
+  </script>
+</body>
+</html>
