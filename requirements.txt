@@ -1,0 +1,8 @@
+# PonkoHUD 运行时依赖
+#   pywebview  — native_host.py 的原生窗口外壳（WebView2）
+#   pywinpty   — server/ptybridge.py 的交互式终端（Windows ConPTY）
+pywebview>=4.0
+pywinpty>=2.0
+
+# 仅开发工具脚本需要（tools/make_landmask.py 等生成素材用，跑应用不需要）
+# Pillow>=10.0

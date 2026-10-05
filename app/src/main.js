@@ -70,6 +70,7 @@ function layout() {
 
 // ── 焦点：SHELL 与 AGENT 共用一条隐藏输入线（IME 友好）
 let focus = 'agent';
+let prevPty = false;                 // 上一帧是否处于真终端模式（用于进入时自动把焦点给 shell）
 function activeInputPanel() { return focus === 'shell' ? panels.shell : panels.agent; }
 
 // 配置框：把隐藏输入框内容同步到当前字段（字段态写值，按钮态清空）
@@ -217,7 +218,13 @@ hidden.addEventListener('keydown', (e) => {
   } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
     e.preventDefault();
     const dir = e.key === 'ArrowUp' ? 1 : -1;
-    (focus === 'shell' ? panels.shell : panels.agent).onArrow(dir);
+    const p = focus === 'shell' ? panels.shell : panels.agent;
+    p.onArrow(dir);
+    // 面板可能改了输入（shell 翻历史）：同步到隐藏输入框，回车才发得出翻出来的命令
+    if (!(focus === 'agent' && panels.agent.inConfig)) {
+      hidden.value = p.input || '';
+      try { hidden.setSelectionRange(hidden.value.length, hidden.value.length); } catch (err) { /* 忽略 */ }
+    }
   }
   if (e.ctrlKey && (e.key === 'm' || e.key === 'M')) {
     e.preventDefault();
@@ -430,6 +437,10 @@ function frame(now) {
   grid.fill(0, 0, grid.cols, grid.rows, ' ', T.text, T.bg);
 
   const C = { theme: T, sys, mood, t, dt, tokRate };
+  // 进入真终端时自动把输入焦点切到 shell：否则字会打到 AGENT 输入框（以前踩过这个坑）
+  const inPtyNow = panels.shell.inPty();
+  if (inPtyNow && !prevPty) { focus = 'shell'; syncHidden(); }
+  prevPty = inPtyNow;
   // 进场动画：推进每个面板的展开进度（easeOut，框冲出后收住）
   const elapsed = (now - bootAt) / 1000;
   for (const k in panels) {

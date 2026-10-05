@@ -270,8 +270,15 @@ export class VT {
       }
       case 'osc':
         if (ch === '\x07') { this._state = 'ground'; this._osc = ''; }
+        else if (ch === '\x1b') { this._state = 'osc-esc'; }        // 可能是 ST 两字节形式 ESC \
         else if (ch === '\n' || code === 0x9c) { this._state = 'ground'; this._osc = ''; }
         else this._osc += ch;
+        return;
+      case 'osc-esc':
+        // OSC 的正常结尾是 ST：单字节 0x9c 或两字节 ESC \。PowerShell 标题就是 ESC \
+        // （以前只认 0x9c/BEL，遇到 ESC \ 会卡在 osc 状态，把后面的提示符全吞掉）
+        if (ch === '\\') { this._state = 'ground'; this._osc = ''; }
+        else { this._state = 'esc'; this._feed(ch); }
         return;
       default: break;
     }

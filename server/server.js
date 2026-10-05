@@ -204,6 +204,19 @@ function pwshCd(dir) {
   pwshSend(`Set-Location -LiteralPath "${String(dir).replace(/"/g, '`"')}" -ErrorAction SilentlyContinue`);
 }
 
+// 把一行命令拆成 argv（处理双/单引号），供 pty.startProgram 直接跑程序
+function splitArgs(s) {
+  const out = []; let cur = ''; let q = null;
+  for (const ch of String(s)) {
+    if (q) { if (ch === q) q = null; else cur += ch; }
+    else if (ch === '"' || ch === "'") q = ch;
+    else if (ch === ' ' || ch === '\t') { if (cur) { out.push(cur); cur = ''; } }
+    else cur += ch;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
 // 命令分发：先处理 shell 切换 / 交互式拦截，再交给对应执行器
 function runCommand(cmd, onLine, onExit) {
   const raw = String(cmd || '').trim();
@@ -245,16 +258,26 @@ function runCommand(cmd, onLine, onExit) {
   // ── 显式进入真终端：pty <cmd>
   if (bare === 'pty' || bare === '!pty') {
     const inner = raw.slice(tok0.length).trim() || 'powershell';
-    pty.startAndRun(inner, { shell: shellKind === 'cmd' ? 'cmd' : 'pwsh', cwd: curDir,
-      cols: Number(process.env.PONKO_PTY_COLS || 100), rows: Number(process.env.PONKO_PTY_ROWS || 30) })
-      .then((r) => { if (!r.ok) onLine('PTY 启动失败：' + (r.msg || '未知原因'), 'err'); });
+    const parts = splitArgs(inner);
+    const first = (parts[0] || '').toLowerCase().replace(/^["']|["']$/g, '').replace(/\.(exe|com|bat|cmd)$/, '');
+    const ptyOpts = { cwd: curDir,
+      cols: Number(process.env.PONKO_PTY_COLS || 100), rows: Number(process.env.PONKO_PTY_ROWS || 30) };
+    // 想要一个真终端（开 shell）→ 直接起 shell（不再在里面重复跑一遍同名 shell）；
+    // 想把某个程序放真终端跑 → 直接跑，退出即回本 shell
+    const isShell = first === 'pwsh' || first === 'powershell' || first === 'cmd';
+    const p = isShell
+      ? pty.start({ ...ptyOpts, shell: first === 'cmd' ? 'cmd' : 'pwsh' })
+      : pty.startProgram(parts, ptyOpts);
+    p.then((r) => { if (!r.ok) onLine('PTY 启动失败：' + (r.msg || '未知原因'), 'err'); });
     onLine('__pty__', 'pty');            // 通知前端：切到终端渲染模式
     return onExit(0, null);
   }
 
-  // ── 交互式程序不再拦截，改开真终端（ConPTY）跑它 —— 这是"卡死"的正解
+  // ── 交互式程序不再拦截，改开真终端（ConPTY）直接跑它 —— 这是"卡死"的正解
+  // 直接在 PTY 里跑程序本身（不是先起一层 shell）：程序退出即 PTY 结束，自动回到当前 shell，
+  // 不会让用户"莫名其妙掉进第二个 cmd/pwsh，还得再 exit 一次"。
   if (noArgs && REPL_BLOCK.has(bare)) {
-    pty.startAndRun(raw, { shell: 'pwsh', cwd: curDir,
+    pty.startProgram([bare], { cwd: curDir,
       cols: Number(process.env.PONKO_PTY_COLS || 100), rows: Number(process.env.PONKO_PTY_ROWS || 30) })
       .then((r) => {
         if (!r.ok) {

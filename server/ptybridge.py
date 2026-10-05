@@ -80,7 +80,7 @@ class Session:
         self.stopped = False
 
     # ── 启动 ──────────────────────────────────────────────
-    def start(self, shell, cwd, cols, rows, env_extra):
+    def start(self, shell, cwd, cols, rows, env_extra, argv=None):
         try:
             from winpty import PtyProcess
         except ImportError:
@@ -88,12 +88,17 @@ class Session:
             emit({"t": "exit", "code": 1, "reason": "no-pywinpty"})
             return False
 
-        if shell == "cmd":
+        if argv:
+            # 直接跑一个程序（python/node/vim…）：不要先起 shell。
+            # 这样程序退出 = PTY 结束 = 前端自动回到上层 shell，不会"卡"在一层多余的 shell 里。
+            spawn_argv = [str(a) for a in argv]
+            self.shell = ""
+        elif shell == "cmd":
             exe = which("cmd") or "cmd.exe"
-            argv = [exe]
+            spawn_argv = [exe]
         else:
             exe = which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-            argv = [exe, "-NoLogo", "-NoExit"]
+            spawn_argv = [exe, "-NoLogo", "-NoExit"]
             self.shell = "pwsh"
 
         env = os.environ.copy()
@@ -110,7 +115,7 @@ class Session:
             env[k] = v
 
         try:
-            self.proc = PtyProcess.spawn(argv, cwd=cwd or None, env=env,
+            self.proc = PtyProcess.spawn(spawn_argv, cwd=cwd or None, env=env,
                                          dimensions=(max(4, rows), max(10, cols)))
         except Exception as e:  # noqa: BLE001
             emit({"t": "error", "msg": "PTY 启动失败：%r" % (e,)})
@@ -165,7 +170,8 @@ class Session:
         if not self.proc:
             return
         try:
-            self.write_text("exit\r\n" if self.shell == "pwsh" else "exit\r\n")
+            if self.shell in ("pwsh", "cmd"):
+                self.write_text("exit\r\n")
         except Exception:  # noqa: BLE001
             pass
         deadline = time.time() + 2.0
@@ -200,9 +206,9 @@ def main():
             continue
         op = req.get("op")
         if op == "start":
-            sess.start(req.get("shell") or "pwsh", req.get("cwd"),
+            sess.start(req.get("shell"), req.get("cwd"),
                        int(req.get("cols") or 80), int(req.get("rows") or 24),
-                       req.get("env"))
+                       req.get("env"), req.get("argv"))
         elif op == "write":
             sess.write_text(b64d(req.get("d")))
         elif op == "resize":

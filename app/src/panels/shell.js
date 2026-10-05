@@ -23,7 +23,13 @@ export class ShellPanel {
     this.kind = 'pwsh';            // pwsh | cmd（由后端同步）
     this.onLine = null;            // 输出钩子（主装配拿它扫 IP 往地球上打标记）
     this.pty = null;               // {vt, off, scroll} —— 非 null 即真终端模式
+    this._ptyLabel = '';           // 真终端里跑的程序名（显示用）
+    this._lastCmd = '';            // 最近一条命令（用来给真终端取名字）
     this._resizeAt = 0;
+    this.hist = [];                // 管道模式本地命令历史（↑/↓ 浏览）
+    this.histIdx = -1;             // -1 = 未在浏览历史
+    this.histDraft = '';           // 进入浏览前正在编辑的草稿
+    this._histShown = null;        // 上次由 ↑/↓ 填进输入框的内容（判断用户是否又改了）
     this.push('info', 'Ponko HUD shell · 持久 pwsh 会话 · 输入 help 看可用命令');
     // 拉一次后端真实状态：会话实际起始目录是 USERPROFILE，前端默认写的 C:\ 是错的，
     // 否则首屏会显示 C:\、跑完第一条命令才跳成真实目录
@@ -57,7 +63,13 @@ export class ShellPanel {
     try { this.pty.off && this.pty.off(); } catch (e) {}
     this.pty = null;
     this.ime = null;
+    this._ptyLabel = '';
     ptyStop();
+    // 退出真终端后重新拉一次后端状态，保证 shell 种类/cwd 跟后端一致（cmd/pwsh 不同步过）
+    fetch('/api/shell/state').then((r) => r.json()).then((s) => {
+      if (s && s.cwd) this.cwd = s.cwd;
+      if (s && s.shell) this.kind = s.shell || this.kind;
+    }).catch(() => {});
     this.push('info', reason || '已退出真终端，回到管道模式。');
   }
 
@@ -97,11 +109,14 @@ export class ShellPanel {
     this.push('cmd', c);
     if (!c) return;
     if (this.pty) { this.sendToPty(c); return; }   // 真终端里：整行发进去，由程序自己回显
+    // 记入命令历史（与上一条相同则不重复记）；↑/↓ 用它回翻
+    if (this.hist[this.hist.length - 1] !== c) this.hist.push(c);
+    this.histIdx = -1; this.histDraft = ''; this._histShown = null;
     if (c === 'clear' || c === 'cls') { this.lines.length = 0; return; }
     if (c === 'help') {
       this.push('info', '当前 shell：' + (this.kind === 'cmd' ? 'CMD' : 'PowerShell'));
       this.push('info', 'cmd / powershell   切换 shell（exit 从 CMD 退回）');
-      this.push('info', 'clear 清屏 · ESC 中断 · pty <cmd> 开真终端（任意程序都行）');
+      this.push('info', 'clear 清屏 · ESC 中断 · ↑/↓ 翻命令历史 · pty <cmd> 开真终端（任意程序都行）');
       this.push('info', '交互式程序（python / node / ssh / vim…裸跑）会自动开真终端');
       this.push('info', '真终端 = 按键直通：^C 中断 · ^D 结束输入 · ^E 退出终端');
       return;
@@ -116,6 +131,8 @@ export class ShellPanel {
       else if (e.t === 'cwd') this.cwd = e.text;
       else if (e.t === 'shell') this.kind = e.text || 'pwsh';
       else if (e.t === 'pty') {                    // 后端开好真终端了，前端切渲染模式
+        // 给真终端取个名字：'python' / 'pty python' / 'pty pwsh' 都取到程序名
+        this._ptyLabel = String(c).replace(/^!?pty\s+/i, '').split(/\s+/)[0] || '';
         this.enterPty();
         this.busy = false;
         return;
@@ -145,16 +162,27 @@ export class ShellPanel {
     this.push('info', '^C 已中断');
   }
 
-  /** ↑ / ↓：真终端里是历史，管道模式里是滚屏 */
+  /** ↑ / ↓：真终端里交给程序（命令历史），管道模式里翻本地命令历史（滚屏交给鼠标滚轮） */
   onArrow(dir) {
     if (this.pty) { ptyWrite(dir > 0 ? '\x1b[A' : '\x1b[B'); return true; }
-    return this.onWheel(-dir);
+    if (!this.hist.length) return true;
+    // 用户又改了输入（跟上次回翻填进去的不一样）→ 重新开始浏览
+    if (this.histIdx === -1 || this.input !== this._histShown) {
+      this.histDraft = this.input;
+      this.histIdx = this.hist.length;
+    }
+    if (dir > 0) { if (this.histIdx > 0) this.histIdx--; }             // ↑ 往旧翻
+    else { if (this.histIdx < this.hist.length) this.histIdx++; }      // ↓ 往新翻
+    this.input = this.histIdx >= this.hist.length ? this.histDraft : this.hist[this.histIdx];
+    this._histShown = this.input;
+    this.caret = this.input.length;
+    return true;
   }
 
   draw(g, C) {
     const r = this.rect, T = C.theme;
     if (!r || r.w < 8 || r.h < 4) return;
-    const right = this.busy ? 'running' : (this.pty ? 'pty' : this.kind);
+    const right = this.busy ? 'running' : (this.pty ? (this._ptyLabel || '真终端') : this.kind);
     g.box(r.x, r.y, r.w, r.h, this.focus ? T.accent : T.line, T.panel,
       this.pty ? 'TERM' : 'SHELL', T.accent, right);
     if (this.pty) return this.drawPty(g, C);
@@ -228,7 +256,11 @@ export class ShellPanel {
       }
       while (cx < r.x + r.w - 1) { g.set(cx, yy, ' ', T.text, T.panel); cx++; }
     }
-    if (!hasContent) g.text(x + 2, r.y + 1 + (viewH >> 1), '启动真终端中…', T.dim, T.panel);
+    if (!hasContent) {
+      const name = this._ptyLabel ? `：${this._ptyLabel}` : '';
+      g.text(x + 2, r.y + 1 + (viewH >> 1), `正在启动真终端${name}…`, T.dim, T.panel);
+      g.text(x + 2, r.y + 2 + (viewH >> 1), '（真终端让交互程序能用；Ctrl+Shift+E 退出）', T.darker, T.panel);
+    }
 
     // IME 合成中：拼音预览画在光标处（还没发进程序，只是让你看见自己正在打什么）
     const absY0 = vt.scrollback.length + vt.y;

@@ -47,16 +47,21 @@ class PtySession {
     }
   }
 
-  /** PowerShell 输出切 UTF-8 + 清屏（在任何用户命令之前，顺序由这里保证） */
+  /** PowerShell 启动后按 shell 类型发初始化（直接跑程序时无 shell，跳过） */
   _sendInit() {
+    if (this.shell !== 'pwsh' && this.shell !== 'cmd') return;
     setTimeout(() => {
       if (this.proc && this.running) {
-        this.write('[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Clear-Host\r\n');
+        // 结尾只用 \r（Enter）。用 \r\n 时多出的 \n 会被误当续行。
+        // 命令本身也必须匹配 shell：CMD 不认 PowerShell 语法（会报“语法不正确”）。
+        this.write(this.shell === 'cmd'
+          ? 'chcp 65001 >nul & cls\r'
+          : '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Clear-Host\r');
       }
     }, 300);
   }
 
-  /** 启动后等 PowerShell 就绪，再把命令喂进真终端（交互式程序专用） */
+  /** 启动后等 shell 就绪，再把命令喂进真终端（交互式程序专用） */
   async startAndRun(cmd, opts = {}) {
     const r = await this.start(opts);
     if (!r.ok) return r;
@@ -66,13 +71,22 @@ class PtySession {
       const off = this.on((ev) => { if (ev.t === 'ready' && ev.gen === this.gen) setTimeout(done, 1300); });
       setTimeout(done, 5000);            // 兜底，别让请求挂死
     });
-    this.write(String(cmd) + '\r\n');
+    this.write(String(cmd) + '\r');
     return r;
+  }
+
+  /**
+   * 直接在 PTY 里跑一个程序（argv 数组），不先起 shell。
+   * 程序退出 = PTY 结束 = 前端自动回到上层 shell（不会留一层多余 shell）。
+   */
+  startProgram(argv, opts = {}) {
+    return this.start({ ...opts, argv });
   }
 
   /** @returns {Promise<{ok:boolean,msg?:string}>} */
   start(opts = {}) {
-    const shell = opts.shell === 'cmd' ? 'cmd' : 'pwsh';
+    const useArgv = Array.isArray(opts.argv) && opts.argv.length > 0;
+    const shell = useArgv ? '' : (opts.shell === 'cmd' ? 'cmd' : 'pwsh');
     const cols = Math.max(10, Math.min(400, opts.cols || 80));
     const rows = Math.max(4, Math.min(200, opts.rows || 24));
     this.cols = cols;
@@ -123,7 +137,11 @@ class PtySession {
       this._emit({ t: 'exit', code: 0, reason: 'bridge-gone', gen });
     });
 
-    this._send({ op: 'start', shell, cwd: opts.cwd || undefined, cols, rows });
+    // 启动桥：argv 模式直接跑程序；否则起 shell
+    const startOp = { op: 'start', cwd: opts.cwd || undefined, cols, rows };
+    if (useArgv) startOp.argv = opts.argv;
+    else startOp.shell = shell;
+    this._send(startOp);
     return Promise.resolve({ ok: true });
   }
 
