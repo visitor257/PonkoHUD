@@ -24,14 +24,31 @@ function record(name, ok, detail) {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '   → ' + detail : ''}`);
 }
 
+// 模型写得不规矩时的输出：全角冒号 + 中文逗号 + 单侧括号 + 自创 state。
+// 这些标记必须一个都不出现在对话里（老版本会因为认不出来而原样吐给用户）。
+const WEIRD = ['[[心情：专注，face:thinking]]', '好的，我', '看一下。', '[mood:idle|face:idle|note:收工]'];
+
 // ── mock：同一端口按路径分流，各按自己的协议吐 SSE ──────────────────
-const mock = http.createServer((req, res) => {
+const mock = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
+  let asked = '';
+  try {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+    const last = (body.messages || []).filter((m) => m.role === 'user').pop();
+    asked = String((last && last.content) || body.text || '');
+  } catch (e) { /* 读不到就当普通提问 */ }
+
   if (u.pathname === '/v1/messages') {
     // Anthropic：事件行 + data 行，文本在 delta.text 里
     if ((req.headers['x-api-key'] || '') !== KEY) { res.writeHead(401); res.end('{}'); return; }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-    for (const t of ['HELLO', '-ANTH', 'ROPIC']) {
+    // 第一个片段故意是 "\n\n"：模型惯用 [[mood:...]] + 两个换行开头，
+    // 标记剥掉后这俩换行就变成回复开头的空行，后端必须裁掉
+    const parts = asked.includes('畸形') ? WEIRD
+      : ['\n\n', 'HELLO', '-ANTH', 'ROPIC', '[[mood:idle|face:smile|note:收工]]'];
+    for (const t of parts) {
       res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: t } })}\n\n`);
     }
     res.write('event: message_stop\ndata: {"type":"message_stop"}\n\n');
@@ -41,7 +58,9 @@ const mock = http.createServer((req, res) => {
   if (u.pathname === '/v1/chat/completions') {
     if ((req.headers.authorization || '') !== 'Bearer ' + KEY) { res.writeHead(401); res.end('{}'); return; }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-    for (const t of ['HELLO', '-OPEN', 'AI']) {
+    const parts = asked.includes('畸形') ? WEIRD
+      : ['\n\n', 'HELLO', '-OPEN', 'AI', '[[mood:idle|face:smile|note:收工]]'];
+    for (const t of parts) {
       res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: t } }] })}\n\n`);
     }
     res.write('data: [DONE]\n\n');
@@ -52,21 +71,24 @@ const mock = http.createServer((req, res) => {
 });
 
 // 打 /api/agent（NDJSON 流），把 token 拼回来
-async function chat() {
+async function chat(ask = 'hi') {
   const r = await fetch(BACK + '/api/agent', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: 'hi', history: [] }),
+    body: JSON.stringify({ text: ask, history: [] }),
   });
   const body = await r.text();
   let text = '', done = false, err = '';
+  const moods = [];
+  let doneEv = null;
   for (const line of body.split('\n')) {
     if (!line.trim()) continue;
     let o; try { o = JSON.parse(line); } catch (e) { continue; }
     if (o.t === 'token') text += o.text || '';
-    else if (o.t === 'done') done = true;
+    else if (o.t === 'done') { done = true; doneEv = o; }
     else if (o.t === 'error') err = o.text || '';
+    else if (o.t === 'mood') moods.push(o);
   }
-  return { text, done, err };
+  return { text, done, err, moods, doneEv };
 }
 
 (async () => {
@@ -93,16 +115,37 @@ async function chat() {
   await save({ baseUrl: MOCK_URL, apiKey: KEY, model: 'gpt-x', provider: 'openai' });
   let r = await chat();
   record('OpenAI 流解析正确', r.text === 'HELLO-OPENAI' && r.done && !r.err, JSON.stringify(r));
+  record('OpenAI：回复开头的空两行被裁掉', !/^\s/.test(r.text) && r.text.startsWith('HELLO'), JSON.stringify(r.text.slice(0, 6)));
+  record('OpenAI：done 带回收尾心情', !!r.doneEv && r.doneEv.mood && r.doneEv.mood.state === 'idle',
+    JSON.stringify(r.doneEv && r.doneEv.mood));
+  // 标记正文被剥掉了，但原文要随心情事件带回来 —— 界面显示的"心情语句"就是它
+  record('心情事件带 raw 原文（可显示）',
+    r.moods.length === 1 && r.moods[0].raw === '[[mood:idle|face:smile|note:收工]]',
+    JSON.stringify(r.moods.map((m) => m.raw)));
 
   // 2) Anthropic 原生流
   await save({ baseUrl: MOCK_URL, apiKey: KEY, model: 'claude-x', provider: 'anthropic' });
   r = await chat();
   record('Anthropic 流解析正确', r.text === 'HELLO-ANTHROPIC' && r.done && !r.err, JSON.stringify(r));
+  record('Anthropic：回复开头的空两行被裁掉', !/^\s/.test(r.text) && r.text.startsWith('HELLO'), JSON.stringify(r.text.slice(0, 6)));
+  record('Anthropic：done 带回收尾心情', !!r.doneEv && r.doneEv.mood && r.doneEv.mood.state === 'idle',
+    JSON.stringify(r.doneEv && r.doneEv.mood));
 
   // 3) 协议写错时应当报错，而不是静默给空回答
   await save({ baseUrl: MOCK_URL, apiKey: 'sk-wrong', model: 'claude-x', provider: 'anthropic' });
   r = await chat();
   record('Anthropic 错 Key 有报错', !!r.err && /401/.test(r.err), r.err || JSON.stringify(r));
+
+  // 4) 模型把标记写歪了（全角冒号/中文逗号/单括号/自创 state）：
+  //    控制符一个都不许出现在对话里，心情仍要尽量生效
+  await save({ baseUrl: MOCK_URL, apiKey: KEY, model: 'gpt-x', provider: 'openai' });
+  r = await chat('畸形标记');
+  const leak = /\[\[|\[?mood\s*[:：=]|心情\s*[:：=]/.test(r.text);
+  record('畸形标记：正文里没有控制符', !leak, JSON.stringify(r.text));
+  record('畸形标记：正文完整', r.text === '好的，我看一下。', JSON.stringify(r.text));
+  record('畸形标记：心情仍然生效', r.moods.length >= 1 && r.moods[0].state === 'think',
+    JSON.stringify(r.moods.map((m) => m.state)));
+  record('畸形标记：收尾心情回传', !!r.doneEv && !!r.doneEv.mood, JSON.stringify(r.doneEv && r.doneEv.mood));
 
   // 清理：还原/删除测试产生的 llm-config.json
   try {

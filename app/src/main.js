@@ -9,6 +9,7 @@ import { ShellPanel } from './panels/shell.js';
 import { AgentPanel } from './panels/agent.js';
 import { CharPanel } from './panels/char.js';
 import { GlobePanel } from './panels/globe.js';
+import { Selection } from './selection.js';
 
 const canvas = document.getElementById('screen');
 const grid = new Grid(canvas, { fontSize: 15, lineHeight: 1.2 });
@@ -76,9 +77,14 @@ function activeInputPanel() { return focus === 'shell' ? panels.shell : panels.a
 // 配置框：把隐藏输入框内容同步到当前字段（字段态写值，按钮态清空）
 function syncCfgHidden() {
   const a = panels.agent;
+  // 换了字段就把光标挪到该字段末尾（点选/切换都算），否则上任字段的位置会串过来
+  if (a._cfgIdx !== a.form.idx) { a._cfgIdx = a.form.idx; a.formCaretToEnd(); }
   // 循环字段（协议）不接受文本输入，靠 ←→ 切换，所以这里要把它清空
   if (a.form.idx >= 0 && a.form.idx < a.form.fields.length && a.cfgFieldEditable()) {
     hidden.value = a.form.fields[a.form.idx].value || '';
+    // 原生光标也对到 form.caret，按退格/方向键时两边才在同一位置
+    const pos = Math.max(0, Math.min(hidden.value.length, a.form.caret || 0));
+    try { hidden.setSelectionRange(pos, pos); } catch (e) { /* 某些浏览器对 type 敏感 */ }
   } else hidden.value = '';
 }
 
@@ -93,11 +99,13 @@ function syncHidden() {
   const p = activeInputPanel();
   const r = p.rect;
   if (!r) return;
-  const iy = p === panels.shell ? r.y + r.h - 2 : r.y + r.h - 3;
+  // agent 输入框可以是多行（Enter 换行），隐藏框要跟着长高并从输入框顶端对齐
+  const rows = (p === panels.agent && !panels.agent.inConfig) ? panels.agent.inputRows(grid) : 1;
+  const iy = p === panels.shell ? r.y + r.h - 2 : r.y + r.h - 3 - (rows - 1);
   hidden.style.left = grid.px(r.x + 1) + 'px';
   hidden.style.top = grid.py(iy) + 'px';
   hidden.style.width = Math.max(40, grid.px(r.x + r.w - 1) - grid.px(r.x + 1)) + 'px';
-  hidden.style.height = grid.cellH + 'px';
+  hidden.style.height = grid.cellH * rows + 'px';
   hidden.style.fontSize = grid.fontSize + 'px';
   panels.shell.focus = focus === 'shell';
   panels.agent.focus = focus === 'agent';
@@ -147,9 +155,12 @@ hidden.addEventListener('input', (e) => {
   const p = activeInputPanel();
   p.input = hidden.value;
   p.caret = hidden.selectionStart ?? p.input.length;
+  // 多行内容可能是粘贴进来的（没走 Enter 那条路），输入框高度得跟着变
+  if (focus === 'agent' && !panels.agent.inConfig) syncHidden();
   mood.touch();                          // 打字不等于情绪，只防"长时间无活动"误判
 });
 hidden.addEventListener('keydown', (e) => {
+  // 复制键在 window 捕获阶段统一处理（见 copySel 下方），这里不再重复。
   // 配置框编辑态：拦截 Tab/↑↓/Enter/Esc 走表单导航；其余按键（含中文 IME）照常进隐藏输入框
   if (focus === 'agent' && panels.agent.inConfig) {
     const a = panels.agent;
@@ -157,7 +168,12 @@ hidden.addEventListener('keydown', (e) => {
     if (e.key === 'Tab' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault(); a.configNav(e.key === 'ArrowUp' ? -1 : 1); syncCfgHidden();
     } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-      e.preventDefault(); a.configCycle(e.key === 'ArrowLeft' ? -1 : 1); syncCfgHidden();
+      // ←→ 只管"协议"那种循环字段；文本字段（地址/Key/模型名）必须放行，
+      // 否则 hidden input 收不到这两个键，光标在值里面根本挪不动。
+      if (a.cfgCycleField()) {
+        e.preventDefault(); a.configCycle(e.key === 'ArrowLeft' ? -1 : 1); syncCfgHidden();
+      }
+      // 文本字段：不 preventDefault，交给原生输入框移动光标（keyup 会把位置同步进 form.caret）
     } else if (e.key === 'Enter') {
       e.preventDefault(); a.configEnter(); syncCfgHidden();
     } else if (e.key === 'Escape') {
@@ -202,11 +218,19 @@ hidden.addEventListener('keydown', (e) => {
   const p = activeInputPanel();
   if (e.isComposing) return;
   if (e.key === 'Enter') {
+    // AGENT 聊天输入框：Enter = 换行（交给 textarea 原生插入，input 事件会同步进面板），
+    // 只有 Ctrl+Enter 才发送。shell 命令行仍然是 Enter 直接执行。
+    if (focus === 'agent' && !panels.agent.inConfig && !e.ctrlKey) {
+      mood.touch();
+      syncHidden();                      // 输入框长高一行，隐藏框跟着贴住
+      return;
+    }
     e.preventDefault();
     const text = hidden.value;
     hidden.value = ''; p.input = ''; p.caret = 0;
     if (focus === 'shell') panels.shell.exec(text);
     else panels.agent.send(text);
+    syncHidden();                        // 发送后输入框缩回一行
   } else if (e.key === 'Tab') {
     e.preventDefault();
     focus = focus === 'shell' ? 'agent' : 'shell';
@@ -214,6 +238,7 @@ hidden.addEventListener('keydown', (e) => {
     syncHidden();
   } else if (e.key === 'Escape') {
     e.preventDefault();
+    if (selection.active) { selection.clear(); return; }   // 有选区时先退选，别把 Esc 误当成中断
     if (focus === 'shell') panels.shell.abort(); else panels.agent.abort();
   } else if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
     // 终端惯例：Ctrl+C = 中断。真终端里转发 ^C 给 PTY（杀当前程序），
@@ -242,6 +267,19 @@ hidden.addEventListener('keydown', (e) => {
 // 光靠 input 事件不行——合成期间的 input 会把拼音串当正文发出去。
 // ── 中文 IME：合成期间在终端光标处显示拼音预览（不发给程序，拼音不是正文），
 //    定稿（compositionend）才把最终文本送进 PTY。这是 xterm.js / VSCode 的做法。
+// 只移动光标的按键（←→ / Home / End / 鼠标点击）**不产生 input 事件**，
+// 所以面板的 caret 永远停在最后一次输入的位置 —— 渲染出来的 █ 就一直贴在末尾。
+// 这些时机单独捞一次 selectionStart 补上。
+function syncCaretFromHidden() {
+  if (focus === 'agent' && panels.agent.inConfig) { panels.agent.syncFormCaret(hidden.selectionStart); return; }
+  if (focus === 'shell' && panels.shell.inPty()) return;      // 真终端光标由 VT 自己管
+  const p = activeInputPanel();
+  if (!p) return;
+  const n = (p.input || '').length;
+  p.caret = Math.max(0, Math.min(n, hidden.selectionStart ?? n));
+}
+for (const ev of ['keyup', 'click', 'select']) hidden.addEventListener(ev, syncCaretFromHidden);
+
 hidden.addEventListener('compositionstart', () => {
   if (focus === 'shell' && panels.shell.inPty()) panels.shell.ime = '';
 });
@@ -260,6 +298,61 @@ hidden.addEventListener('compositionend', (e) => {
   drainToPty();
 });
 
+const selection = new Selection();      // 鼠标拖选（详见 selection.js）
+let selToast = { text: '', until: 0 };
+
+async function copySel() {
+  const text = selection.text(grid);
+  if (!text) { selToast = { text: '没有选中内容', until: performance.now() + 1200 }; return; }
+  let ok = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch (e) { ok = false; }
+  // 退回 execCommand。要点是**先 focus 再 select**：WebView2 里元素没焦点时
+  // execCommand('copy') 会静默返回 false（不抛异常），看起来就是"复制没反应"。
+  if (!ok) {
+    const prev = document.activeElement;
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed'; ta.style.left = '-9999px'; ta.style.top = '0';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      try { ta.setSelectionRange(0, ta.value.length); } catch (e0) { /* 忽略 */ }
+      ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+    } catch (e2) { ok = false; }
+    try { if (prev && prev.focus) prev.focus(); } catch (e3) { /* 忽略 */ }
+  }
+  selToast = { text: ok ? `已复制 ${text.length} 字符` : '复制失败', until: performance.now() + 1600 };
+}
+
+// 复制快捷键统一挂 window 的**捕获阶段**。
+// 之前挂在 #hidden-input 上，拖选之后焦点不一定还在它身上（点画布、拖分割条都会挪），
+// 于是"选了却复制不了"。挂到 window 捕获就与焦点无关了，也早于 PTY 的裸直通逻辑。
+//   · ^⇧C / Ctrl+Insert —— 永远复制（无选区则提示"没有选中内容"）
+//   · ^C —— **有选区时 = 复制**（与 Windows Terminal 一致：选中状态下 ^C 是复制，
+//          无选区才落回终端的中断语义）。这样用户的第一直觉 Ctrl+C 就是能用的。
+window.addEventListener('keydown', (e) => {
+  if (!e.ctrlKey || e.altKey || e.metaKey) return;
+  const isC = e.key === 'c' || e.key === 'C';
+  const explicit = (e.shiftKey && isC) || e.key === 'Insert';
+  const plainC = !e.shiftKey && isC;
+  if (!explicit && !(plainC && selection.active)) return;
+  e.preventDefault(); e.stopPropagation();   // 拦住 PTY 裸直通，别让 ^C 又变成中断
+  copySel();
+}, true);
+
+function drawToast(g, T, now) {
+  if (!selToast.text || now > selToast.until) return;
+  g.text(0, g.rows - 1, ` ${selToast.text} `, T.panel, T.accent);
+}
+
 // ── 鼠标：拖拽分割条 / 拖地球 / 点表情标签 / 滚轮
 function cellAt(e) {
   const b = canvas.getBoundingClientRect();
@@ -267,6 +360,38 @@ function cellAt(e) {
 }
 function inRect(r, c) { return r && c.x >= r.x && c.x < r.x + r.w && c.y >= r.y && c.y < r.y + r.h; }
 
+/**
+ * 面板内的单击（不是拖选）：切焦点，并把光标放到点击的那一列。
+ * 之所以挪到 mouseup 再判 —— 按下 = 起选区（可能是拖选），松手时若压根没拖动过才算"点"。
+ * PTY 模式例外：终端画面里的光标由 VT 自己管，别抢。
+ */
+// explicit >= 0 时用它（多行输入框已经自己算好了字符下标）
+function placeCaret(p, iy, x0, c, explicit) {
+  const ci = explicit === undefined || explicit === null
+    ? Math.max(0, Math.min((p.input || '').length, c.x - x0))
+    : Math.max(0, Math.min((p.input || '').length, explicit));
+  p.caret = ci;
+  hidden.value = p.input || '';
+  try { hidden.selectionStart = hidden.selectionEnd = ci; } catch (e) { /* 忽略 */ }
+}
+function clickPanel(hit, c) {
+  if (hit === 'shell') {
+    focus = 'shell';
+    const s = panels.shell;
+    if (!s.inPty()) {
+      const r = s.rect;
+      if (r && c.y === r.y + r.h - 2) placeCaret(s, c.y, r.x + 1 + grid.strWidth(s.prompt), c);
+    }
+    syncHidden();
+    return;
+  }
+  focus = 'agent';
+  const a = panels.agent;
+  if (a.inConfig) { a.configMouse(c); syncHidden(); return; }
+  const ci = a.caretFromPoint(grid, c.x, c.y);      // 多行输入框：点哪落在哪个字符
+  if (ci !== null) placeCaret(a, 0, 0, c, ci);
+  syncHidden();
+}
 canvas.addEventListener('mousedown', (e) => {
   const c = cellAt(e);
   hidden.focus();
@@ -278,25 +403,19 @@ canvas.addEventListener('mousedown', (e) => {
     const key = panels.char.chipAt(c.x, c.y);
     if (key) { mood.force(key); return; }
   }
-  if (inRect(rects.shell, c)) { focus = 'shell'; syncHidden(); return; }
-  if (inRect(rects.agent, c)) {
-    focus = 'agent';
-    const a = panels.agent;
-    if (a.inConfig) { a.configMouse(c); syncHidden(); return; }
-    // 点输入行：聚焦并把光标放到点击位置，鼠标也能输入对话
-    const iy = a.rect.y + a.rect.h - 3, x0 = a.rect.x + 3;
-    if (c.y === iy) {
-      const ci = Math.max(0, Math.min(a.input.length, c.x - x0));
-      a.caret = ci; hidden.value = a.input;
-      try { hidden.selectionStart = hidden.selectionEnd = ci; } catch (e) {}
-    }
-    syncHidden();
-    return;
-  }
+  const hit = inRect(rects.shell, c) ? 'shell' : inRect(rects.agent, c) ? 'agent' : null;
+  if (!hit) return;
+  // SHELL / AGENT 面板正文：先起选区。到底是拖选还是单击，等松手时看有没有拖动过。
+  selection.begin(c, hit === 'shell' ? rects.shell : rects.agent, hit);
+  // 到底是拖选还是单击，松手时由 selection.end() 判定（见下方 mouseup）
+  e.preventDefault();          // 别让浏览器起原生文本/元素拖拽，抢走 mousemove
 });
 window.addEventListener('mousemove', (e) => {
-  if (!dragSplit && !panels.globe.dragging) return;
+  // 松手发生在窗口外时会漏掉 mouseup：按钮已弹起就顺便收尾，免得选区一直跟着鼠标长
+  if (selection.drag && !e.buttons) selection.end();
+  if (!dragSplit && !panels.globe.dragging && !selection.drag) return;
   const c = cellAt(e);
+  if (selection.drag) { selection.to(c); if (!dragSplit && !panels.globe.dragging) return; }
   if (dragSplit) {
     if (dragSplit.k === 's1') L.left = Math.max(20, Math.min(grid.cols - 40, L.left + (c.x - dragSplit.x)));
     else if (dragSplit.k === 's2') {
@@ -312,7 +431,13 @@ window.addEventListener('mousemove', (e) => {
   }
   panels.globe.onMove(c.x, c.y);
 });
-window.addEventListener('mouseup', () => { dragSplit = null; panels.globe.onUp(); });
+window.addEventListener('mouseup', () => {
+  // end() 返回 true = 这次按下压根没拖动，按"单击"处理（切焦点 / 挪光标）；
+  // 拖出选区时返回 false，此时别动光标，否则选着文字光标却跑掉了
+  const wasClick = selection.drag ? selection.end() : false;
+  if (wasClick && selection.tag) clickPanel(selection.tag, selection.at);
+  dragSplit = null; panels.globe.onUp();
+});
 canvas.addEventListener('wheel', (e) => {
   const c = cellAt(e);
   const p = inRect(rects.shell, c) ? panels.shell : inRect(rects.agent, c) ? panels.agent : null;
@@ -426,9 +551,9 @@ function drawChrome(T) {
   const by = rows - 2;
   grid.text(0, by, '─'.repeat(cols), T.line, T.bg);
   const f = focus === 'shell' ? 'SHELL' : 'AGENT';
-  const tip = `▚ 输入焦点=${f} · 地球拖拽旋转 · IP 栏自动横滚 · 配置框可鼠标点 · 分割条可拖`;
+  const tip = `▚ 焦点=${f} · 按住拖选文本 · 地球可拖 · 分割条可拖`;
   grid.text(0, by + 1, tip, T.dim, T.bg);
-  const keys = `[TAB]切换 [ESC]中断 [^M]心情 [滚轮]滚动`;
+  const keys = `[TAB]切换 [^⏎]发送/回车换行 [ESC]退选/中断 [^⇧C]或[^C]复制 [^M]心情 [滚轮]滚动`;
   grid.text(Math.max(0, cols - keys.length), by + 1, keys, T.darker, T.bg);
 }
 
@@ -474,6 +599,8 @@ function frame(now) {
   if (hr) grid.text(hr.x, hr.y, '╌'.repeat(hr.w), T.line, T.bg);
 
   drawChrome(T);
+  selection.paint(grid);   // 选区反色：必须在所有面板画完之后、render 之前
+  drawToast(grid, T, now);
   grid.render();
 
   requestAnimationFrame(frame);

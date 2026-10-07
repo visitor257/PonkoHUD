@@ -7,8 +7,9 @@
 </head>
 <body>
   <canvas id="screen"></canvas>
-  <!-- 隐藏输入线：承接键盘与中文 IME（Canvas 自己接不了输入法），定位到当前输入行 -->
-  <input id="hidden-input" autocomplete="off" spellcheck="false">
+  <!-- 隐藏输入线：承接键盘与中文 IME（Canvas 自己接不了输入法），定位到当前输入行。
+       用 textarea 而不是 input：input 存不住 '\n'，而 agent 输入框要支持 Enter 换行。 -->
+  <textarea id="hidden-input" rows="1" wrap="off" autocomplete="off" spellcheck="false"></textarea>
   <div id="boot">初始化…</div>
   <script type="module" src="src/main.js"></script>
   <script>

@@ -218,10 +218,15 @@ export class ShellPanel {
     const iy = r.y + r.h - 2;
     let cx = g.text(x, iy, prompt, T.accent, T.panel);
     const maxLen = Math.max(1, r.x + r.w - 1 - cx - 1);
-    const visible = this.input.slice(Math.max(0, this.caret - maxLen + 1), this.caret - Math.max(0, this.caret - maxLen + 1) + maxLen);
-    cx = g.text(cx, iy, visible, T.text, T.panel);
+    // 长命令把光标推进可视区内：窗口跟着 caret 滑，而不是永远从头开始截断
+    const caret = Math.max(0, Math.min(this.caret, this.input.length));
+    const off = Math.max(0, caret - maxLen + 1);
+    const tx0 = cx;
+    g.text(tx0, iy, this.input.slice(off, off + maxLen), T.text, T.panel);
+    // 光标必须画在 caret 对应的那一列（原来直接拿 g.text 的返回列 = 永远贴末尾）
     if (this.focus && Math.floor(C.t * 2) % 2 === 0) {
-      g.set(cx, iy, '█', T.accent, T.accent);
+      const col = tx0 + g.strWidth(this.input.slice(off, caret));
+      if (col < r.x + r.w - 1) g.set(col, iy, '█', T.accent, T.accent);
     }
   }
 

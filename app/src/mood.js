@@ -19,7 +19,11 @@ export const MOOD_LABEL = Object.fromEntries(MOOD_KEYS.map((k) => [k, MOOD_STATE
 
 const SOURCE_TAG = { agent: 'AGENT', auto: '本地兜底', manual: '手动' };
 const SILENCE_MS = 120000;      // 无 agent 活动这么久 → 本地兜底进入低功耗
-const DEFAULT_HOLD = 20000;     // agent 没给 until 时的默认保持时长
+// agent 没给 until 时的默认保持时长。
+// 之前是 20s，结果"输出过程中声明的心情"一回复完就过期、界面立刻回落成待机(idle)，
+// 用户体感是"心情只在输出时有效"。心情是 agent 的权威声明，没理由 20 秒就作废，
+// 这里放宽到 5 分钟（agent 仍可用 until 自己指定，上限 10 分钟）。
+const DEFAULT_HOLD = 300000;
 
 export class Mood {
   constructor() {

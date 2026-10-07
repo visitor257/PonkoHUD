@@ -567,20 +567,68 @@ async function streamAgent(res, text, history) {
 
   // 真 LLM 的 token 会随意切开 [[mood:...]]，交给解析器跨片段还原
   const parser = new moodp.MoodStreamParser(facesFromPacks());
+  const trimLead = makeLeadTrimmer();
 
   const chunks = toChunks(fakeAgentBody(text));
-  let tokens = 0;
+  let tokens = 0, lastMood = null;
   for (const raw of chunks) {
     const taken = parser.feed(raw);
-    for (const m of taken.moods) emit({ t: 'mood', ...m, src: 'agent' });
-    if (taken.text) { emit({ t: 'token', text: taken.text }); tokens++; }
+    for (const m of taken.moods) { lastMood = m; emit({ t: 'mood', ...m, src: 'agent' }); }
+    const s = trimLead(taken.text);
+    if (s) { emit({ t: 'token', text: s }); tokens++; }
     await new Promise((r) => setTimeout(r, 18 + Math.floor(Math.random() * 30)));
   }
   const tail = parser.flush();                  // 收尾：冲刷缓冲里的半截标记
-  for (const m of tail.moods) emit({ t: 'mood', ...m, src: 'agent' });
-  if (tail.text) { emit({ t: 'token', text: tail.text }); tokens++; }
-  emit({ t: 'done', tokens: Math.max(1, Math.ceil(tokens / 1.6)) });
+  for (const m of tail.moods) { lastMood = m; emit({ t: 'mood', ...m, src: 'agent' }); }
+  const ts = trimLead(tail.text);
+  if (ts) { emit({ t: 'token', text: ts }); tokens++; }
+  emit({ t: 'done', tokens: Math.max(1, Math.ceil(tokens / 1.6)), mood: lastMood || undefined });
   res.end();
+}
+
+/**
+ * 流式正文的开头空白裁剪器。
+ * 模型惯用的写法是先在正文前甩一个 [[mood:...]]、再换行两次才开始说正事：
+ *     [[mood:think|note:想想]]\n\n正文……
+ * 标记被解析器剥掉之后，那两个换行就原封不动地留在了回复最前面 ——
+ * 用户看到的就是"每次回答开头都空两行"。这里把正文真正开始之前的空白全部吃掉，
+ * 只在开头生效一次，正文中间的换行/缩进原样保留。
+ */
+function makeLeadTrimmer() {
+  let started = false;
+  return (s) => {
+    if (!s) return '';
+    if (started) return s;
+    const t = s.replace(/^[\s\u3000]+/, '');
+    if (!t) return '';            // 还没真正开始说话，这段空白整个丢掉
+    started = true;
+    return t;
+  };
+}
+
+// 把前端送来的近期对话整理成 LLM 的消息数组（不含 system、不含本次提问）。
+// 三个坑：
+//   ① 角色名要映射：前端的 'agent' → assistant；system 走单独字段不入列；
+//      未知角色一律当 user，免得部分服务对着非法 role 直接 400。
+//   ② 历史末尾若已经躺着一条和本次提问一模一样的 user（前端没排干净 / 重发），要剔掉，
+//      否则同一次提问被发两遍。
+//   ③ 窗口要够宽：10 条只有 5 轮，聊几轮前面的就忘了。
+const MAX_HISTORY_MSGS = 20;                  // 约 10 轮
+function buildHistory(history, text) {
+  const out = [];
+  const cur = String(text || '').trim();
+  const src = Array.isArray(history) ? history.slice(-MAX_HISTORY_MSGS) : [];
+  for (const m of src) {
+    if (!m || !m.content) continue;
+    const content = String(m.content).trim();
+    if (!content) continue;
+    let role = m.role === 'agent' ? 'assistant' : m.role;
+    if (role === 'system') continue;
+    if (role !== 'user' && role !== 'assistant') role = 'user';
+    out.push({ role, content });
+  }
+  while (out.length && out[out.length - 1].role === 'user' && out[out.length - 1].content === cur) out.pop();
+  return out;
 }
 
 // 真 LLM（SSE 流式）。两套协议：OpenAI 兼容 /chat/completions 与 Anthropic 原生 /messages。
@@ -592,13 +640,7 @@ async function callRealLLM(res, emit, text, history) {
   if (!base) { emit({ t: 'error', text: 'LLM 未配置：缺少 API 地址' }); return; }
   const url = base.replace(/\/v1$/, '') + '/v1/chat/completions';   // 兼容带或不带 /v1 的地址
   const sys = moodp.buildSystemPrompt(facesFromPacks());
-  const messages = [{ role: 'system', content: sys }];
-  if (Array.isArray(history)) {
-    for (const m of history.slice(-10)) {
-      if (!m || !m.role || !m.content) continue;
-      messages.push({ role: m.role === 'agent' ? 'assistant' : m.role, content: String(m.content) });
-    }
-  }
+  const messages = [{ role: 'system', content: sys }, ...buildHistory(history, text)];
   messages.push({ role: 'user', content: text });
 
   let resp;
@@ -618,8 +660,9 @@ async function callRealLLM(res, emit, text, history) {
 
   const reader = resp.body.getReader();
   const dec = new TextDecoder();
-  let buf = '', tokens = 0;
+  let buf = '', tokens = 0, lastMood = null;
   const parser = new moodp.MoodStreamParser(facesFromPacks());
+  const trimLead = makeLeadTrimmer();
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -635,15 +678,17 @@ async function callRealLLM(res, emit, text, history) {
         const delta = j.choices && j.choices[0] && j.choices[0].delta ? (j.choices[0].delta.content || '') : '';
         if (!delta) continue;
         const taken = parser.feed(delta);
-        for (const m of taken.moods) emit({ t: 'mood', ...m, src: 'agent' });
-        if (taken.text) { emit({ t: 'token', text: taken.text }); tokens++; }
+        for (const m of taken.moods) { lastMood = m; emit({ t: 'mood', ...m, src: 'agent' }); }
+        const s = trimLead(taken.text);
+        if (s) { emit({ t: 'token', text: s }); tokens++; }
       }
     }
   } catch (e) { emit({ t: 'error', text: '读取 LLM 流失败：' + e.message }); }
   const tail = parser.flush();
-  for (const m of tail.moods) emit({ t: 'mood', ...m, src: 'agent' });
-  if (tail.text) { emit({ t: 'token', text: tail.text }); tokens++; }
-  emit({ t: 'done', tokens: Math.max(1, tokens) });
+  for (const m of tail.moods) { lastMood = m; emit({ t: 'mood', ...m, src: 'agent' }); }
+  const ts = trimLead(tail.text);
+  if (ts) { emit({ t: 'token', text: ts }); tokens++; }
+  emit({ t: 'done', tokens: Math.max(1, tokens), mood: lastMood || undefined });
 }
 
 // Anthropic 原生（Claude）：POST /v1/messages，x-api-key 头，SSE 事件是
@@ -656,16 +701,8 @@ async function callAnthropic(res, emit, text, history) {
   const url = base.replace(/\/v1$/, '') + '/v1/messages';
   const sys = moodp.buildSystemPrompt(facesFromPacks());
 
-  const raw = [];
-  if (Array.isArray(history)) {
-    for (const m of history.slice(-10)) {
-      if (!m || !m.content) continue;
-      if (m.role === 'system') continue;                     // system 走单独字段
-      raw.push({ role: m.role === 'agent' ? 'assistant' : 'user', content: String(m.content) });
-    }
-  }
-  raw.push({ role: 'user', content: text });
-  // 合并连续同角色 + 保证首条是 user
+  const raw = [...buildHistory(history, text), { role: 'user', content: text }];
+  // 合并连续同角色 + 保证首条是 user（Anthropic 要求严格交替，否则 400）
   const messages = [];
   for (const m of raw) {
     const prev = messages[messages.length - 1];
@@ -703,8 +740,9 @@ async function callAnthropic(res, emit, text, history) {
 
   const reader = resp.body.getReader();
   const dec = new TextDecoder();
-  let buf = '', tokens = 0;
+  let buf = '', tokens = 0, lastMood = null;
   const parser = new moodp.MoodStreamParser(facesFromPacks());
+  const trimLead = makeLeadTrimmer();
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -723,15 +761,17 @@ async function callAnthropic(res, emit, text, history) {
         if (j.type === 'error' && j.error && j.error.message) { emit({ t: 'error', text: String(j.error.message).slice(0, 200) }); }
         if (!delta) continue;
         const taken = parser.feed(delta);
-        for (const m of taken.moods) emit({ t: 'mood', ...m, src: 'agent' });
-        if (taken.text) { emit({ t: 'token', text: taken.text }); tokens++; }
+        for (const m of taken.moods) { lastMood = m; emit({ t: 'mood', ...m, src: 'agent' }); }
+        const s = trimLead(taken.text);
+        if (s) { emit({ t: 'token', text: s }); tokens++; }
       }
     }
   } catch (e) { emit({ t: 'error', text: '读取 LLM 流失败：' + e.message }); }
   const tail = parser.flush();
-  for (const m of tail.moods) emit({ t: 'mood', ...m, src: 'agent' });
-  if (tail.text) { emit({ t: 'token', text: tail.text }); tokens++; }
-  emit({ t: 'done', tokens: Math.max(1, tokens) });
+  for (const m of tail.moods) { lastMood = m; emit({ t: 'mood', ...m, src: 'agent' }); }
+  const ts = trimLead(tail.text);
+  if (ts) { emit({ t: 'token', text: ts }); tokens++; }
+  emit({ t: 'done', tokens: Math.max(1, tokens), mood: lastMood || undefined });
 }
 
 /** 当前所有素材包的表情标签（给 LLM 的 system 提示词用） */

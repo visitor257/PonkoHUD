@@ -9,16 +9,25 @@ html, body {
   cursor: default;
   user-select: none;
 }
-/* 隐藏输入线：透明但可聚焦，位置由 JS 对齐到当前输入行 */
+/* 隐藏输入线：透明但可聚焦，位置由 JS 对齐到当前输入行。
+   必须 pointer-events:none —— 它是被拉成整行宽贴在输入行上的，一旦参与命中，
+   鼠标按下就被它吃掉（并触发看不见的原生文本拖选），canvas 收不到事件 → 那一行没法框选。
+   键盘 IME 不受影响：JS 的 focus() 与 selectionStart 都不依赖鼠标命中。 */
 #hidden-input {
   position: fixed;
   left: 0; top: 0; width: 10px; height: 16px;
   opacity: 0;
+  pointer-events: none;
   border: 0; outline: 0; padding: 0; margin: 0;
   background: transparent;
   color: transparent;
   caret-color: transparent;
   font-family: inherit;
+  /* textarea 专用：不许用户拖大、不许自己滚动、不许自动软化换行影响布局 */
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  line-height: 1;
   z-index: 10;
 }
 #boot {
