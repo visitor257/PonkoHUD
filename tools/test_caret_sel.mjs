@@ -3,12 +3,16 @@ import { AgentPanel } from '../app/src/panels/agent.js';
 import { ShellPanel } from '../app/src/panels/shell.js';
 import { Selection } from '../app/src/selection.js';
 import { exitWidth, exitLabel, exitButtonRect } from '../app/src/exitbutton.js';
+import { zoomBtnRect, zoomWidth, fullRect } from '../app/src/zoombtn.js';
 
 let fail = 0;
 const chk = (name, ok, got) => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : '   → ' + got}`);
   if (!ok) fail++;
 };
+
+// 真实字体（15px 等宽 + 中文 fallback）实测格宽：⛶/〼 是 2 格，□/■ 是 1 格
+const CH_W = { '⛶': 2, '〼': 2, '□': 1, '■': 1 };
 
 // ── 极简网格替身：只实现面板画字时用到的几个原语，并记录每次 set 的坐标
 function mkGrid() {
@@ -17,7 +21,9 @@ function mkGrid() {
   const g = {
     cols: 200, rows: 80,
     rows, sets,
-    chWidth: (c) => (c && c.charCodeAt(0) > 0x2e80 ? 2 : 1),
+    // 真实字体下实测的格宽（tools/_measure_sym.mjs）：几何符号区里不少字符是全角，
+    // 光靠码点范围会算错（⛶ U+26F6 实测 2 格，按范围会判 1 格）→ 这里按实测值覆盖。
+    chWidth: (c) => CH_W[c] ?? (c && c.charCodeAt(0) > 0x2e80 ? 2 : 1),
     strWidth(s) { let n = 0; for (const ch of s) n += g.chWidth(ch); return n; },
     text(x, y, s) {
       let col = x; const r = rows.get(y) || {};
@@ -553,6 +559,48 @@ console.log('\n── 10. 右上角退出按钮：三态等宽 + 文字不被裁
 
   // 补的是空格：去掉两侧空格后与原始标签一致
   chk('补齐只加空格、不删字', ['idle', 'armed', 'quitting'].every((s) => lbl(s).trim() === raw[s].trim()), '');
+}
+
+console.log('\n── 11. 各框右下角的 ⛶ / 〼 放大按钮 ──');
+{
+  const g = mkGrid();
+  g.cols = 120; g.rows = 40;
+
+  const r = { x: 0, y: 2, w: 34, h: 12 };            // 典型的 GLOBE 框
+  const off = zoomBtnRect(g, r, false);
+  const on = zoomBtnRect(g, r, true);
+
+  chk('按钮落在框的底边线上', off.y === r.y + r.h - 1, off.y);
+  chk('按钮在框内且不吃掉右下角', off.x1 === r.x + r.w - 2 && off.x0 >= r.x + 1, JSON.stringify(off));
+  chk('放大/还原两态等宽', g.strWidth(off.label) === g.strWidth(on.label)
+    && g.strWidth(off.label) === zoomWidth(g), `${g.strWidth(off.label)} vs ${g.strWidth(on.label)}`);
+  chk('用符号不写字：平常 ⛶、放大态 〼',
+    on.label.includes('〼') && off.label.includes('⛶')
+    && !off.label.includes('〼') && !on.label.includes('⛶'),
+    `${JSON.stringify(off.label)} / ${JSON.stringify(on.label)}`);
+  chk('两个符号都没被截掉（补齐后仍完整包含）',
+    off.label.trim() === '⛶' && on.label.trim() === '〼',
+    `${JSON.stringify(off.label)} / ${JSON.stringify(on.label)}`);
+  chk('按钮至少 4 列宽（符号只有 2 格，太窄点不中）', zoomWidth(g) >= 4, zoomWidth(g));
+  // 两个符号都是 2 格宽 → 只要按钮宽度是偶数，两边的补白就能平分，符号落在正中间
+  const pads = (lbl, sym) => {
+    const i = lbl.indexOf(sym);
+    return { l: i, r: lbl.length - i - sym.length };
+  };
+  const pOff = pads(off.label, '⛶');
+  chk('⛶ 在按钮正中间（左右补白相等）', pOff.l === pOff.r,
+    `${JSON.stringify(off.label)} 左${pOff.l} 右${pOff.r}`);
+  const pOn = pads(on.label, '〼');
+  chk('〼 也在按钮正中间（左右补白相等）', pOn.l === pOn.r,
+    `${JSON.stringify(on.label)} 左${pOn.l} 右${pOn.r}`);
+  chk('两态左边界不动', off.x0 === on.x0, `${off.x0} vs ${on.x0}`);
+
+  // 放大后的目标矩形：占满整个内容区，上下 chrome 行留着（退出按钮/快捷键还够得着）
+  const full = fullRect(g, 2, 2);
+  chk('放大后占满整宽', full.x === 0 && full.w === g.cols, JSON.stringify(full));
+  chk('放大后上下各留 2 行 chrome', full.y === 2 && full.h === g.rows - 4, JSON.stringify(full));
+  const big = zoomBtnRect(g, full, true);
+  chk('放大后按钮仍在右下角', big.y === full.y + full.h - 1 && big.x1 === g.cols - 2, JSON.stringify(big));
 }
 
 console.log(`\n${fail === 0 ? '全部通过' : fail + ' 项失败'}`);

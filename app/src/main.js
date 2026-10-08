@@ -11,6 +11,7 @@ import { CharPanel } from './panels/char.js';
 import { GlobePanel } from './panels/globe.js';
 import { Selection } from './selection.js';
 import { exitButtonRect } from './exitbutton.js';
+import { ZOOM_KEYS, PANEL_NAME, zoomBtnRect, fullRect } from './zoombtn.js';
 
 const canvas = document.getElementById('screen');
 const grid = new Grid(canvas, { fontSize: 15, lineHeight: 1.2 });
@@ -35,10 +36,13 @@ let rects = {};
 let dragSplit = null;
 const SPLIT_W = 1;
 const SYS_H = 8;                  // 右下 SYS 小格高度
+const CHROME_TOP = 2, CHROME_BOT = 2;   // 顶栏 / 底部提示各占的行数（放大态也保留）
+let zoom = null;                  // 被放大到全屏的面板 key（null = 正常分栏）
+let zoomHits = [];                // 每帧登记的「放大/还原」按钮命中区
 
 function layout() {
   const cols = grid.cols, rows = grid.rows;
-  const topH = 2, botH = 2;
+  const topH = CHROME_TOP, botH = CHROME_BOT;
   const y0 = topH, mainH = rows - topH - botH;
   const midW = Math.max(20, cols - L.left - L.right - SPLIT_W * 2);
   const lx = 0, cx = L.left + SPLIT_W, rx = cx + midW + SPLIT_W;
@@ -68,6 +72,50 @@ function layout() {
     if (r && r.w >= 4 && r.h >= 3) p.orient = (r.w >= r.h) ? 'h' : 'v';
     if (p.open === undefined) { p.open = 0; p.delay = OPEN_DELAY[k] ?? 0; p.contentFade = 0; }
   }
+  // 放大态：把这个框的 rect 换成整个内容区（其它框的 rect 保持原样，只是不画）
+  if (zoom && rects[zoom] && panels[zoom]) {
+    const full = fullRect(grid, CHROME_TOP, CHROME_BOT);
+    rects[zoom] = full;
+    panels[zoom].layout(full);
+    panels[zoom].orient = (full.w >= full.h) ? 'h' : 'v';
+  }
+}
+
+// ── 单框放大：点框右下角的按钮把它拉满整个内容区，再点还原 ──
+function toggleZoom(key) {
+  if (!panels[key]) return;
+  if (zoom === key) {
+    zoom = null;
+    selToast = { text: `已还原 ${PANEL_NAME[key] || key}`, until: performance.now() + 1600 };
+  } else {
+    zoom = key;
+    selToast = { text: `已放大 ${PANEL_NAME[key] || key} · 点右下角 〼 恢复`, until: performance.now() + 2600 };
+    if (key === 'shell' || key === 'agent') focus = key;
+  }
+  layout(); syncHidden();
+}
+
+/** 画各框右下角的 □ / 〼 按钮（在面板之后画，盖在底边线上）
+ *  符号只有 1~2 格，所以平常态用比底边线亮一档的 lineHi 当底色，免得糊在 '─' 里看不见。 */
+function drawZoomButtons(T) {
+  zoomHits = [];
+  for (const k of ZOOM_KEYS) {
+    const p = panels[k];
+    if (!p || !p.rect) continue;
+    if (zoom && zoom !== k) continue;                 // 放大态只画被放大那个框的按钮
+    if ((p.open === undefined ? 1 : p.open) < 1) continue;   // 进场动画期间框还没成形
+    const r = p.rect;
+    if (r.w < 10 || r.h < 3) continue;                // 太小的框（比如被压扁的 SYS）不放按钮
+    const on = zoom === k;
+    const b = zoomBtnRect(grid, r, on);
+    zoomHits.push({ x0: b.x0, x1: b.x1, y: b.y, key: k });
+    grid.text(b.x0, b.y, b.label, on ? T.bg : T.dim, on ? T.accent : T.lineHi);
+  }
+}
+
+function zoomBtnAt(c) {
+  for (const h of zoomHits) if (c.y === h.y && c.x >= h.x0 && c.x <= h.x1) return h.key;
+  return null;
 }
 
 // ── 焦点：SHELL 与 AGENT 共用一条隐藏输入线（IME 友好）
@@ -483,19 +531,25 @@ canvas.addEventListener('mousedown', (e) => {
     requestQuit();
     return;
   }
+  // 各框右下角的「放大 / 还原」按钮（在底边线上，优先于框内的一切操作）
+  const zb = zoomBtnAt(c);
+  if (zb) { e.preventDefault(); toggleZoom(zb); return; }
   hidden.focus();
-  if (inRect(rects.s1, c)) { dragSplit = { k: 's1', x: c.x }; return; }
-  if (inRect(rects.s2, c)) { dragSplit = { k: 's2', x: c.x }; return; }
-  if (inRect(rects.hsplit, c)) { dragSplit = { k: 'h', y: c.y }; return; }
-  if (panels.globe.hit(c.x, c.y)) { panels.globe.onDown(c.x, c.y); return; }
-  if (panels.char) {
+  // 放大态：分割条跟被盖住的框都不该再响应（它们的 rect 还在，但屏幕上没有）
+  if (!zoom) {
+    if (inRect(rects.s1, c)) { dragSplit = { k: 's1', x: c.x }; return; }
+    if (inRect(rects.s2, c)) { dragSplit = { k: 's2', x: c.x }; return; }
+    if (inRect(rects.hsplit, c)) { dragSplit = { k: 'h', y: c.y }; return; }
+  }
+  if ((!zoom || zoom === 'globe') && panels.globe.hit(c.x, c.y)) { panels.globe.onDown(c.x, c.y); return; }
+  if ((!zoom || zoom === 'char') && panels.char) {
     const key = panels.char.chipAt(c.x, c.y);
     if (key) { mood.force(key); return; }
   }
   // SHELL 标签栏在框**外**（顶线上方那一行），不在 rects.shell 里 —— 单独命中：
   // 点标签切过去、点 “+” 新开一个（都不动输入光标，也就无需走选区那套）
   const sr = rects.shell;
-  if (sr && c.y === panels.shell.tabBarRow() && c.x >= sr.x && c.x < sr.x + sr.w) {
+  if ((!zoom || zoom === 'shell') && sr && c.y === panels.shell.tabBarRow() && c.x >= sr.x && c.x < sr.x + sr.w) {
     const i = panels.shell.tabAt(c.x, c.y);
     focus = 'shell';
     if (i === -1) panels.shell.newTab();
@@ -505,10 +559,13 @@ canvas.addEventListener('mousedown', (e) => {
     e.preventDefault();
     return;
   }
-  const hit = inRect(rects.shell, c) ? 'shell' : inRect(rects.agent, c) ? 'agent' : null;
-  if (!hit) return;
+  // 放大态下点哪都只算被放大那个框（其它框没画出来，选区不能落到它们身上）
+  const hit = zoom
+    ? (inRect(rects[zoom], c) ? zoom : null)
+    : (inRect(rects.shell, c) ? 'shell' : inRect(rects.agent, c) ? 'agent' : null);
+  if (!hit || (hit !== 'shell' && hit !== 'agent')) return;
   // SHELL / AGENT 面板正文：先起选区。到底是拖选还是单击，等松手时看有没有拖动过。
-  selection.begin(c, hit === 'shell' ? rects.shell : rects.agent, hit);
+  selection.begin(c, rects[hit], hit);
   // 到底是拖选还是单击，松手时由 selection.end() 判定（见下方 mouseup）
   e.preventDefault();          // 别让浏览器起原生文本/元素拖拽，抢走 mousemove
 });
@@ -542,9 +599,12 @@ window.addEventListener('mouseup', () => {
 });
 canvas.addEventListener('wheel', (e) => {
   const c = cellAt(e);
-  const p = inRect(rects.shell, c) ? panels.shell : inRect(rects.agent, c) ? panels.agent : null;
+  // 放大态：滚轮只给被放大那个框（放大 GLOBE 时在地球上面滚就不该滚到 SHELL 的历史）
+  const p = zoom
+    ? ((zoom === 'shell' || zoom === 'agent') ? panels[zoom] : null)
+    : (inRect(rects.shell, c) ? panels.shell : inRect(rects.agent, c) ? panels.agent : null);
   if (p && p.onWheel(e.deltaY)) { e.preventDefault(); return; }
-  if (panels.globe.hit(c.x, c.y)) {
+  if ((!zoom || zoom === 'globe') && panels.globe.hit(c.x, c.y)) {
     if (panels.globe.onWheel(e.deltaY, e.deltaX)) e.preventDefault();
   }
 }, { passive: false });
@@ -663,7 +723,9 @@ function drawChrome(T) {
   const by = rows - 2;
   grid.text(0, by, '─'.repeat(cols), T.line, T.bg);
   const f = focus === 'shell' ? 'SHELL' : 'AGENT';
-  const tip = `▚ 焦点=${f} · 按住拖选文本 · 地球可拖 · 分割条可拖`;
+  const tip = zoom
+    ? `▚ 已放大 ${PANEL_NAME[zoom] || zoom} · 点右下角 〼 恢复分栏`
+    : `▚ 焦点=${f} · 按住拖选文本 · 地球可拖 · 分割条可拖 · 框右下角 ⛶ 放大`;
   grid.text(0, by + 1, tip, T.dim, T.bg);
   const keys = `[TAB]切换 [^⏎]发送/回车换行 [ESC]退选/中断 [^⇧C]或[^C]复制 [^⇧T]新标签 [^Tab]切换标签 [^M]心情 [^⇧Q]退出 [滚轮]滚动`;
   grid.text(Math.max(0, cols - keys.length), by + 1, keys, T.darker, T.bg);
@@ -695,29 +757,37 @@ function frame(now) {
       p.contentFade = Math.min(1, p.contentFade + dt / contentDur);
     }
   }
-  drawPanel(panels.sys, grid, C);
-  drawPanel(panels.globe, grid, C);
-  drawPanel(panels.shell, grid, C);
-  drawPanel(panels.agent, grid, C);
-  drawPanel(panels.char, grid, C);
+  // 放大态：只画被放大那一个框，其余连同分割条都不画（它们的 rect 还在，但屏幕上没有）
+  if (zoom) {
+    drawPanel(panels[zoom], grid, C);
+  } else {
+    drawPanel(panels.sys, grid, C);
+    drawPanel(panels.globe, grid, C);
+    drawPanel(panels.shell, grid, C);
+    drawPanel(panels.agent, grid, C);
+    drawPanel(panels.char, grid, C);
+  }
 
   // 分割条
-  for (const k of ['s1', 's2']) {
-    const r = rects[k];
-    if (!r) continue;
-    for (let y = r.y; y < r.y + r.h; y++) grid.set(r.x, y, '│', T.line, T.bg);
+  if (!zoom) {
+    for (const k of ['s1', 's2']) {
+      const r = rects[k];
+      if (!r) continue;
+      for (let y = r.y; y < r.y + r.h; y++) grid.set(r.x, y, '│', T.line, T.bg);
+    }
+    const hr = rects.hsplit;
+    if (hr) grid.text(hr.x, hr.y, '╌'.repeat(hr.w), T.line, T.bg);
   }
-  const hr = rects.hsplit;
-  if (hr) grid.text(hr.x, hr.y, '╌'.repeat(hr.w), T.line, T.bg);
 
   drawChrome(T);
   // SHELL 标签栏画在框顶线**之上**（框外），必须晚于 chrome 的分隔线 —— 否则那行 '─' 会盖掉它
-  if (panels.shell.open >= 1) {
+  if ((!zoom || zoom === 'shell') && panels.shell.open >= 1) {
     grid.fadeBg = T.panel;
     grid.fade = (panels.shell.contentFade === undefined || panels.shell.contentFade >= 1) ? 1 : panels.shell.contentFade;
     panels.shell.drawTabBar(grid, C);
     grid.fade = 1;
   }
+  drawZoomButtons(T);   // 各框右下角的放大/还原按钮（盖在底边线上，所以必须最后画）
   selection.paint(grid);   // 选区反色：必须在所有面板画完之后、render 之前
   drawToast(grid, T, now);
   grid.render();
