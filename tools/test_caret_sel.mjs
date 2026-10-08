@@ -2,6 +2,7 @@
 import { AgentPanel } from '../app/src/panels/agent.js';
 import { ShellPanel } from '../app/src/panels/shell.js';
 import { Selection } from '../app/src/selection.js';
+import { exitWidth, exitLabel, exitButtonRect } from '../app/src/exitbutton.js';
 
 let fail = 0;
 const chk = (name, ok, got) => {
@@ -429,6 +430,129 @@ console.log('\n── 8. 心情语句的显示与开关 ──');
   const anyRow = (sub) => [...g.rows.values()].some((r) => textOf(r).includes(sub));
   chk('配置框含「心情语句」字段', anyRow('心情语句'), '');
   chk('配置框仍有 保存 / 取消 按钮', anyRow('保存') && anyRow('取消'), '');
+}
+
+// 9. 多标签终端：一个标签一份状态（输入/cwd/历史），彼此不串；标签栏可点；id 必须能当后端会话 id
+console.log('\n── 9. 多标签终端 ──');
+{
+  const g = mkGrid();
+  const s = new ShellPanel({});
+  s.layout({ x: 3, y: 2, w: 50, h: 14 });
+
+  chk('默认只有一个标签', s.tabs.length === 1 && s.active === 0, `${s.tabs.length}/${s.active}`);
+  chk('标签 id 可直接当后端会话 id', /^[A-Za-z0-9_-]{1,24}$/.test(s.tab.id), s.tab.id);
+
+  const t0 = s.tab;
+  t0.input = 'aaa'; t0.caret = 3;
+  s.newTab();
+  chk('新建后两个标签且光标切到新的', s.tabs.length === 2 && s.active === 1, `${s.tabs.length}/${s.active}`);
+  chk('新标签有独立的会话 id', s.tab.id !== t0.id, `${s.tab.id} vs ${t0.id}`);
+  chk('新标签输入框是空的（没串到旧标签）', s.input === '' && s.caret === 0, JSON.stringify(s.input));
+
+  s.input = 'bbb';
+  s.selectTab(0);
+  chk('切回标签 1 看到它自己的输入与光标', s.input === 'aaa' && s.caret === 3, `${s.input}/${s.caret}`);
+  chk('标签 2 的输入没被改掉', s.tabs[1].input === 'bbb', s.tabs[1].input);
+
+  s.selectTab(1);
+  s.nextTab(1);
+  chk('nextTab(1) 到下个标签', s.active === 0, s.active);
+  s.nextTab(-1);
+  chk('nextTab(-1) 回上一个', s.active === 1, s.active);
+
+  // cwd / shell 种类也按标签各算各的
+  t0.cwd = 'C:\\Windows'; t0.kind = 'cmd';
+  s.tabs[1].cwd = 'D:\\work';
+  s.selectTab(0);
+  chk('标签 1 的 cwd/shell 是自己的', s.cwd === 'C:\\Windows' && s.kind === 'cmd', `${s.cwd}/${s.kind}`);
+  s.selectTab(1);
+  chk('切过来就是标签 2 的 cwd', s.cwd === 'D:\\work', s.cwd);
+
+  // 标签栏绘制 + 命中区（标签栏已移到 SHELL 框**外**：框顶线上面那一行）
+  s.selectTab(0);
+  g.rows.clear(); g.sets.length = 0;
+  s.draw(g, C);
+  s.drawTabBar(g, C);                 // 框内画完后再画框外的标签栏（同 main.js 的调用顺序）
+  const barRow = s.tabBarRow();
+  const bar = (() => {
+    const r = g.rows.get(barRow) || {};
+    return Object.keys(r).sort((a, b) => a - b).map((k) => (r[k] === '~' ? '' : r[k])).join('');
+  })();
+  chk('标签栏画出了两个标签', bar.includes('1') && bar.includes('2'), JSON.stringify(bar));
+  chk('标签栏有新建按钮 +', bar.includes('+'), JSON.stringify(bar));
+  chk('标签栏在框顶线之上（框外）', barRow === s.rect.y - 1 && barRow === 1, barRow);
+  chk('tabAt 命中标签 2', s.tabAt(s._tabHits[1].x0, barRow) === 1,
+    JSON.stringify(s._tabHits[1]));
+  chk('tabAt 命中“+”返回 -1', s.tabAt(s._tabHits[2].x0, barRow) === -1,
+    JSON.stringify(s._tabHits[2]));
+  const textAt = (y) => {
+    const r = g.rows.get(y) || {};
+    return Object.keys(r).sort((a, b) => a - b).map((k) => (r[k] === '~' ? '' : r[k])).join('');
+  };
+  chk('输入行仍在面板最后一行（标签栏没顶掉它）',
+    textAt(s.rect.y + s.rect.h - 2).includes('>'), JSON.stringify(textAt(s.rect.y + s.rect.h - 2)));
+
+  // focus / onLine 要覆盖所有标签（含之后新建的）
+  const s2 = new ShellPanel({});
+  s2.focus = true;
+  chk('focus 落在活动标签', s2.tab.focus === true, '');
+  s2.newTab();
+  chk('新建标签后焦点跟着走，旧标签不再有焦点',
+    s2.tab.focus === true && s2.tabs[0].focus === false, '');
+
+  const seen = [];
+  const s3 = new ShellPanel({});
+  s3.onLine = (l) => seen.push(l);
+  s3.push('out', 'hello');
+  s3.newTab();
+  s3.push('out', 'world');
+  chk('onLine 对新建的标签同样生效',
+    seen.includes('hello') && seen.includes('world'), JSON.stringify(seen));
+
+  // 关闭：最后一个不给关
+  const first = s.tabs[0].id;
+  chk('关掉标签 1 成功', s.closeTab(0) === true, '');
+  chk('关完只剩一个且 id 是另一个', s.tabs.length === 1 && s.tabs[0].id !== first, s.tabs[0].id);
+  chk('只剩一个时拒绝再关', s.closeTab() === false, '');
+}
+
+console.log('\n── 10. 右上角退出按钮：三态等宽 + 文字不被裁 ──');
+{
+  const g = mkGrid();
+  g.cols = 120;                                   // 真实窗口下这个值远大于按钮宽度
+
+  const W = exitWidth(g);
+  const rect = (st) => exitButtonRect(g, st);
+  const lbl = (st) => exitLabel(g, st);
+
+  // 三态盒宽完全相同（这就是"按钮忽长忽短"的直接回归）
+  const w0 = g.strWidth(lbl('idle'));
+  const w1 = g.strWidth(lbl('armed'));
+  const w2 = g.strWidth(lbl('quitting'));
+  chk('三态标签宽度一致', w0 === w1 && w1 === w2 && w0 === W, `idle=${w0} armed=${w1} quitting=${w2} W=${W}`);
+
+  // 落位一致：左边界不动、右边界贴屏幕最右
+  const r0 = rect('idle'), r1 = rect('armed'), r2 = rect('quitting');
+  chk('三态左边界相同', r0.x0 === r1.x0 && r1.x0 === r2.x0, `${r0.x0}/${r1.x0}/${r2.x0}`);
+  chk('右边界贴住最右列', r0.x1 === g.cols - 1 && r1.x1 === g.cols - 1, `${r0.x1}/${r1.x1}`);
+  chk('命中区宽度 = 绘制宽度（三态都不错位）',
+    [r0, r1, r2].every((r) => r.x1 - r.x0 + 1 === W), `${r0.x1 - r0.x0 + 1}/${W}`);
+
+  // 文字完整：补的是空格，不是把字吃掉
+  chk('待确认态完整包含「再点一次」', lbl('armed').includes('✕ 再点一次'), JSON.stringify(lbl('armed')));
+  chk('退出中态完整包含「退出中」', lbl('quitting').includes('✕ 退出中'), JSON.stringify(lbl('quitting')));
+  chk('平常态完整包含「退出」', lbl('idle').includes('✕ 退出'), JSON.stringify(lbl('idle')));
+  chk('三态都带 ✕ 图标', ['idle', 'armed', 'quitting'].every((s) => lbl(s).includes('✕')), '');
+
+  // 回归守卫：如果哪个标签天生比其它长，就必须靠补齐 ——
+  // 断言"未补齐的原始标签确实不等宽"，否则上面那条会失去意义（说明文字被换短了）
+  const raw = { idle: ' ✕ 退出 ', armed: ' ✕ 再点一次 ', quitting: ' ✕ 退出中… ' };
+  const rw = (s) => g.strWidth(raw[s]);
+  chk('原始标签本身不等宽（所以才需要补齐）', rw('armed') !== rw('idle'), `${rw('armed')} vs ${rw('idle')}`);
+  chk('补齐后不会越界（右端正好落在最后一列）', r0.x0 + W === g.cols, `${r0.x0}+${W} vs ${g.cols}`);
+
+  // 补的是空格：去掉两侧空格后与原始标签一致
+  chk('补齐只加空格、不删字', ['idle', 'armed', 'quitting'].every((s) => lbl(s).trim() === raw[s].trim()), '');
 }
 
 console.log(`\n${fail === 0 ? '全部通过' : fail + ' 项失败'}`);

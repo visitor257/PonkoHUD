@@ -46,7 +46,7 @@ function stream(url, body, onEvent, onEnd) {
   return () => ctrl.abort();
 }
 
-export const runShell = (cmd, onEvent, onEnd) => stream('/api/shell', { cmd }, onEvent, onEnd);
+export const runShell = (cmd, onEvent, onEnd, session) => stream('/api/shell', { cmd, session }, onEvent, onEnd);
 export const askAgent = (text, onEvent, onEnd, history) => stream('/api/agent', { text, history: history || [] }, onEvent, onEnd);
 
 // ── LLM 接入配置（前端配置框用）
@@ -57,27 +57,34 @@ export const saveLlmConfig = (cfg) => post('/api/llm/config', cfg);
 export const testLlmConfig = (cfg) => fetch('/api/llm/test', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg || {}),
 }).then((r) => r.json()).catch((e) => ({ ok: false, error: '请求后端失败：' + String(e.message) }));
-export const abortShell = () => fetch('/api/shell', {
-  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ abort: true }),
+export const abortShell = (session) => fetch('/api/shell', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ abort: true, session }),
 });
 
-// ── PTY（真终端）：交互式程序专用
+// ── PTY（真终端）：交互式程序专用。每个标签一个会话，session 就是标签 id
 function post(url, body) {
   return fetch(url, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
   }).then((r) => r.json()).catch(() => ({ ok: false }));
 }
+const q = (session) => '?s=' + encodeURIComponent(session || '0');
 
-export const ptyStart = (opts) => post('/api/pty', { op: 'start', ...(opts || {}) });
-export const ptyWrite = (text) => post('/api/pty', { op: 'write', text });
-export const ptyResize = (cols, rows) => post('/api/pty', { op: 'resize', cols, rows });
-export const ptyStop = () => post('/api/pty', { op: 'stop' });
-export const ptyStatus = () => fetch('/api/pty/status').then((r) => r.json()).catch(() => ({ running: false }));
+export const ptyStart = (opts, session) => post('/api/pty', { op: 'start', session, ...(opts || {}) });
+export const ptyWrite = (text, session) => post('/api/pty', { op: 'write', text, session });
+export const ptyResize = (cols, rows, session) => post('/api/pty', { op: 'resize', cols, rows, session });
+export const ptyStop = (session) => post('/api/pty', { op: 'stop', session });
+/** 关标签时用：连会话带子进程一起回收 */
+export const ptyClose = (session) => post('/api/pty', { op: 'close', session });
+export const ptyStatus = (session) => fetch('/api/pty/status' + q(session))
+  .then((r) => r.json()).catch(() => ({ running: false }));
+export const shellState = (session) => fetch('/api/shell/state' + q(session))
+  .then((r) => r.json()).catch(() => ({}));
 
-/** 订阅终端输出流（NDJSON 长连接） */
-export function ptyStream(onEvent, onEnd) {
+/** 订阅某个会话的终端输出流（NDJSON 长连接） */
+export function ptyStream(session, onEvent, onEnd) {
   const ctrl = new AbortController();
-  fetch('/api/pty/stream', { signal: ctrl.signal }).then(async (res) => {
+  fetch('/api/pty/stream' + q(session), { signal: ctrl.signal }).then(async (res) => {
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = '';

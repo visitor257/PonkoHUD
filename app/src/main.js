@@ -10,6 +10,7 @@ import { AgentPanel } from './panels/agent.js';
 import { CharPanel } from './panels/char.js';
 import { GlobePanel } from './panels/globe.js';
 import { Selection } from './selection.js';
+import { exitButtonRect } from './exitbutton.js';
 
 const canvas = document.getElementById('screen');
 const grid = new Grid(canvas, { fontSize: 15, lineHeight: 1.2 });
@@ -300,6 +301,10 @@ hidden.addEventListener('compositionend', (e) => {
 
 const selection = new Selection();      // 鼠标拖选（详见 selection.js）
 let selToast = { text: '', until: 0 };
+// 顶部右上角「退出」按钮：命中区（列范围，行 0）+ 两步确认时间戳
+let exitBtn = { x0: -1, x1: -1, y: -1 };
+let quitArmed = 0;
+let quitting = false;        // 已确认退出：按钮定格在「退出中…」，后续点击一律忽略
 
 async function copySel() {
   const text = selection.text(grid);
@@ -348,9 +353,87 @@ window.addEventListener('keydown', (e) => {
   copySel();
 }, true);
 
+// 多标签终端（对齐 eDEX-UI 的终端标签）：^⇧T 新建 / ^⇧W 关闭 / ^Tab、^⇧Tab 切换。
+// 同样挂捕获阶段 —— 点过画布或标签栏之后焦点未必还在隐藏输入框上，挂在它身上会漏键。
+function afterTabChange() {
+  focus = 'shell';
+  hidden.value = panels.shell.input || '';
+  syncHidden();
+  const s = panels.shell;
+  selToast = { text: `终端标签 ${s.active + 1}/${s.tabs.length}`, until: performance.now() + 1200 };
+}
+window.addEventListener('keydown', (e) => {
+  if (!e.ctrlKey || e.altKey || e.metaKey) return;
+  const k = e.key;
+  if (e.shiftKey && (k === 'T' || k === 't')) {
+    e.preventDefault(); e.stopPropagation();
+    if (!panels.shell.newTab()) {
+      selToast = { text: '标签数已达上限', until: performance.now() + 1600 };
+      return;
+    }
+    afterTabChange();
+    return;
+  }
+  if (e.shiftKey && (k === 'W' || k === 'w')) {
+    e.preventDefault(); e.stopPropagation();
+    if (!panels.shell.closeTab()) {
+      selToast = { text: '最后一个标签不能关', until: performance.now() + 1600 };
+      return;
+    }
+    afterTabChange();
+    return;
+  }
+  if (k === 'Tab') {                       // ^Tab 下一个 / ^⇧Tab 上一个
+    e.preventDefault(); e.stopPropagation();
+    if (panels.shell.nextTab(e.shiftKey ? -1 : 1)) afterTabChange();
+    return;
+  }
+  if (e.shiftKey && (k === 'Q' || k === 'q')) {   // ^⇧Q 退出（与右上角按钮同样的两步确认）
+    e.preventDefault(); e.stopPropagation();
+    requestQuit();
+    return;
+  }
+}, true);
+
 function drawToast(g, T, now) {
   if (!selToast.text || now > selToast.until) return;
   g.text(0, g.rows - 1, ` ${selToast.text} `, T.panel, T.accent);
+}
+
+// ── 退出应用：顶部右上角有个「✕ 退出」按钮（全屏无边框窗口没有标题栏，得给个出口）──
+// 两步确认：第一次点只是"待确认"，3 秒内再点一次才真的退，防止误触把 HUD 关掉。
+// 按下第二步后按钮切成「退出中…」并**一直保持**（不再变回「退出」，也不再吃点击）——
+// 退出本身是异步的（要等 JS 桥、还要等后台收尾），期间按钮如果显示成「退出」，
+// 看起来就像"我刚才那一下没生效"。
+function requestQuit() {
+  if (quitting) return;
+  const now = performance.now();
+  if (quitArmed && now - quitArmed < 3000) { quitArmed = 0; doQuit(); return; }
+  quitArmed = now;
+  selToast = { text: '再点一次「退出」确认关闭 Ponko HUD', until: now + 3000 };
+}
+
+async function doQuit() {
+  quitting = true;                         // 先切态：下一帧按钮就是「退出中…」
+  quitArmed = 0;
+  selToast = { text: '正在退出 Ponko HUD…', until: performance.now() + 8000 };
+  // 1) 原生窗口（pywebview + WebView2）：走宿主暴露的 JS 桥关掉窗口 —— 干净的退出路径，
+  //    窗口一销毁 webview.start 就返回，宿主在 finally 里顺手把 node 后端也收掉。
+  //    桥是页面加载后异步注入的，本机实测大约在 start() 后 2s 就绪，所以给它 3s 慢慢等
+  //    （pywebview 造 api 时要扫一遍 js_api，宿主那边出问题时正是卡在这一步 —— 那种情况
+  //     这里会老老实实超时，落到下面的兜底提示，不会假装"退出了"）。
+  for (let i = 0; i < 30; i++) {
+    const api = window.pywebview && window.pywebview.api;
+    if (api && typeof api.quit === 'function') {
+      try { await api.quit(); return; } catch (e) { /* 桥报错 → 落到兜底 */ }
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  // 2) 兜底：Edge --app 启动路径没有桥，让窗口关自己
+  try { window.close(); } catch (e) { /* 忽略 */ }
+  // 兜底也失败 → 回到可点击状态，别让按钮永远卡在「退出中…」骗人
+  quitting = false;
+  selToast = { text: '无法自动关闭窗口 —— 请运行 stop.bat 退出', until: performance.now() + 8000 };
 }
 
 // ── 鼠标：拖拽分割条 / 拖地球 / 点表情标签 / 滚轮
@@ -394,6 +477,12 @@ function clickPanel(hit, c) {
 }
 canvas.addEventListener('mousedown', (e) => {
   const c = cellAt(e);
+  // 顶部右上角「退出」按钮（chrome 栏，不属于任何面板）
+  if (exitBtn.y === 0 && c.y === 0 && c.x >= exitBtn.x0 && c.x <= exitBtn.x1) {
+    e.preventDefault();
+    requestQuit();
+    return;
+  }
   hidden.focus();
   if (inRect(rects.s1, c)) { dragSplit = { k: 's1', x: c.x }; return; }
   if (inRect(rects.s2, c)) { dragSplit = { k: 's2', x: c.x }; return; }
@@ -402,6 +491,19 @@ canvas.addEventListener('mousedown', (e) => {
   if (panels.char) {
     const key = panels.char.chipAt(c.x, c.y);
     if (key) { mood.force(key); return; }
+  }
+  // SHELL 标签栏在框**外**（顶线上方那一行），不在 rects.shell 里 —— 单独命中：
+  // 点标签切过去、点 “+” 新开一个（都不动输入光标，也就无需走选区那套）
+  const sr = rects.shell;
+  if (sr && c.y === panels.shell.tabBarRow() && c.x >= sr.x && c.x < sr.x + sr.w) {
+    const i = panels.shell.tabAt(c.x, c.y);
+    focus = 'shell';
+    if (i === -1) panels.shell.newTab();
+    else if (i !== null && i >= 0) panels.shell.selectTab(i);
+    hidden.value = panels.shell.input || '';
+    syncHidden();
+    e.preventDefault();
+    return;
   }
   const hit = inRect(rects.shell, c) ? 'shell' : inRect(rects.agent, c) ? 'agent' : null;
   if (!hit) return;
@@ -542,18 +644,28 @@ function drawChrome(T) {
   const model = panels.agent && panels.agent.llmConfigured ? 'local · 已接 LLM' : 'local · 未接 LLM';
   const left = '▚ PONKO HUD   GLOBE · SHELL · AGENT · MOOD · SYS';
   grid.text(0, 0, left, T.accent, T.bg);
+
+  // 右上角：退出按钮（全屏无边框窗口没有系统标题栏，这里补一个出口）。
+  // 三态（平常 / 待确认 / 退出中）**共用同一个宽度**，短的那句居中补空格 ——
+  // 否则「再点一次」一出现按钮就变长、左边界往回缩，看着像在抖（详见 exitbutton.js）。
+  // 待确认用琥珀色、退出中用深色（表示"已经按下去了，别再点"）。
+  const armed = quitArmed && performance.now() - quitArmed < 3000;
+  const exit = exitButtonRect(grid, quitting ? 'quitting' : armed ? 'armed' : 'idle');
+  exitBtn = { x0: exit.x0, x1: exit.x1, y: 0 };
+  grid.text(exit.x0, 0, exit.label, quitting ? T.dim : T.bg, quitting ? T.line : armed ? T.warn : T.err);
+
   const host = sys ? `${sys.user}@${sys.host}` : 'offline';
   const clock = new Date().toTimeString().slice(0, 8);
   let right = `${host}   ${clock}   ${fps | 0}fps`;
-  grid.text(Math.max(0, cols - right.length), 0, right, T.dim, T.bg);
-  grid.text(0, 1, '─'.repeat(cols), T.line, T.bg);
+  grid.text(Math.max(0, exit.x0 - 2 - grid.strWidth(right)), 0, right, T.dim, T.bg);
+  grid.text(0, 1, '─'.repeat(grid.cols), T.line, T.bg);
 
   const by = rows - 2;
   grid.text(0, by, '─'.repeat(cols), T.line, T.bg);
   const f = focus === 'shell' ? 'SHELL' : 'AGENT';
   const tip = `▚ 焦点=${f} · 按住拖选文本 · 地球可拖 · 分割条可拖`;
   grid.text(0, by + 1, tip, T.dim, T.bg);
-  const keys = `[TAB]切换 [^⏎]发送/回车换行 [ESC]退选/中断 [^⇧C]或[^C]复制 [^M]心情 [滚轮]滚动`;
+  const keys = `[TAB]切换 [^⏎]发送/回车换行 [ESC]退选/中断 [^⇧C]或[^C]复制 [^⇧T]新标签 [^Tab]切换标签 [^M]心情 [^⇧Q]退出 [滚轮]滚动`;
   grid.text(Math.max(0, cols - keys.length), by + 1, keys, T.darker, T.bg);
 }
 
@@ -599,6 +711,13 @@ function frame(now) {
   if (hr) grid.text(hr.x, hr.y, '╌'.repeat(hr.w), T.line, T.bg);
 
   drawChrome(T);
+  // SHELL 标签栏画在框顶线**之上**（框外），必须晚于 chrome 的分隔线 —— 否则那行 '─' 会盖掉它
+  if (panels.shell.open >= 1) {
+    grid.fadeBg = T.panel;
+    grid.fade = (panels.shell.contentFade === undefined || panels.shell.contentFade >= 1) ? 1 : panels.shell.contentFade;
+    panels.shell.drawTabBar(grid, C);
+    grid.fade = 1;
+  }
   selection.paint(grid);   // 选区反色：必须在所有面板画完之后、render 之前
   drawToast(grid, T, now);
   grid.render();

@@ -4,14 +4,22 @@
 //   · 管道模式（默认）：后端持久会话逐行回传，中文/退出码/cwd 都稳
 //   · PTY 模式：命中交互式程序（python/node/ssh…）或输入 `pty <cmd>` 时切到 ConPTY
 //     真终端，输出是 ANSI 流，交给 vt.js 维护屏幕缓冲后按格渲染（颜色/光标/全屏都对）
+//
+// 多标签（对齐 eDEX-UI 的终端标签）：ShellTab = 一个标签的全部状态，ShellPanel = 标签栏 +
+// 当前标签。每个标签在后端是一个独立的会话（自己的持久 pwsh、cwd、shell 种类、PTY），
+// 后台标签的 PTY 流也不退订 —— 切回来屏幕内容、滚屏位置都还在。
 import { ATTR } from '../grid.js';
-import { runShell, abortShell, ptyWrite, ptyResize, ptyStop, ptyStream } from '../api.js';
+import { runShell, abortShell, ptyWrite, ptyResize, ptyStop, ptyClose, ptyStream, shellState } from '../api.js';
 import { VT, cellColor } from '../vt.js';
 
-export class ShellPanel {
-  constructor(mood) {
-    this.rect = null;
+const MAX_TABS = 8;
+
+// ── 一个标签：所有状态都在实例上，标签之间互不共享 ────────────────────────
+export class ShellTab {
+  constructor(mood, id, n) {
     this.mood = mood;
+    this.id = id;              // 后端会话 id（也是 /api/shell、/api/pty 的 session）
+    this.n = n;                // 标签序号（只用于显示）
     this.lines = [];           // {kind:'cmd'|'out'|'err'|'info', text}
     this.cwd = 'C:\\';
     this.busy = false;
@@ -19,6 +27,7 @@ export class ShellPanel {
     this.input = '';
     this.caret = 0;
     this.focus = false;
+    this.rect = null;
     this._cancel = null;
     this.kind = 'pwsh';            // pwsh | cmd（由后端同步）
     this.onLine = null;            // 输出钩子（主装配拿它扫 IP 往地球上打标记）
@@ -30,22 +39,40 @@ export class ShellPanel {
     this.histIdx = -1;             // -1 = 未在浏览历史
     this.histDraft = '';           // 进入浏览前正在编辑的草稿
     this._histShown = null;        // 上次由 ↑/↓ 填进输入框的内容（判断用户是否又改了）
-    this.push('info', 'Ponko HUD shell · 持久 pwsh 会话 · 输入 help 看可用命令');
-    // 拉一次后端真实状态：会话实际起始目录是 USERPROFILE，前端默认写的 C:\ 是错的，
-    // 否则首屏会显示 C:\、跑完第一条命令才跳成真实目录
-    fetch('/api/shell/state').then((r) => r.json()).then((s) => {
+    this.push('info', 'Ponko HUD shell · 持久会话 · 输入 help 看可用命令');
+    this.refreshState();
+  }
+
+  /** 拉一次后端真实状态：会话实际起始目录是 USERPROFILE，前端默认写的 C:\ 是错的 */
+  refreshState() {
+    return shellState(this.id).then((s) => {
       if (s && s.cwd) this.cwd = s.cwd;
       if (s && s.shell) this.kind = s.shell || 'pwsh';
     }).catch(() => { /* 后端没起来就先用默认 C:\，不影响功能 */ });
+  }
+
+  /** 标签栏上的名字：真终端就显示程序名 */
+  title() {
+    if (this.pty) return this._ptyLabel || 'term';
+    return this.kind === 'cmd' ? 'cmd' : 'pwsh';
+  }
+
+  /** 关标签时调用：退订、中止、让后端回收整个会话（连 pwsh 子进程一起） */
+  dispose() {
+    try { this._cancel && this._cancel(); } catch (e) { /* 已经结束了 */ }
+    try { this.pty && this.pty.off && this.pty.off(); } catch (e) { /* 流已经断了 */ }
+    this.pty = null;
+    this._cancel = null;
+    ptyClose(this.id);
   }
 
   // ── PTY：真终端 ────────────────────────────────────────
   inPty() { return !!this.pty; }
 
   async enterPty(cmd) {
-    if (this.pty) { if (cmd) ptyWrite(cmd + '\r'); return; }
+    if (this.pty) { if (cmd) ptyWrite(cmd + '\r', this.id); return; }
     const vt = new VT(100, 24);
-    const off = ptyStream(
+    const off = ptyStream(this.id,
       (e) => {
         if (e.t === 'out') { vt.write(e.text || ''); if (this.onLine) this.onLine(e.text || ''); }
         else if (e.t === 'exit') this.leavePty('终端已退出');
@@ -55,7 +82,7 @@ export class ShellPanel {
     );
     this.pty = { vt, off, scroll: 0 };
     // 会话由后端拉起（后端才知道该喂什么命令），前端只连流 + 同步尺寸
-    if (cmd) setTimeout(() => ptyWrite(cmd + '\r'), 1500);
+    if (cmd) setTimeout(() => ptyWrite(cmd + '\r', this.id), 1500);
   }
 
   leavePty(reason) {
@@ -64,36 +91,32 @@ export class ShellPanel {
     this.pty = null;
     this.ime = null;
     this._ptyLabel = '';
-    ptyStop();
+    ptyStop(this.id);
     // 退出真终端后重新拉一次后端状态，保证 shell 种类/cwd 跟后端一致（cmd/pwsh 不同步过）
-    fetch('/api/shell/state').then((r) => r.json()).then((s) => {
-      if (s && s.cwd) this.cwd = s.cwd;
-      if (s && s.shell) this.kind = s.shell || this.kind;
-    }).catch(() => {});
+    this.refreshState();
     this.push('info', reason || '已退出真终端，回到管道模式。');
   }
 
   /** 真终端里的按键：整行提交 + 回车；程序自己负责回显 */
   sendToPty(text) {
     if (!this.pty) return;
-    ptyWrite(text + '\r');
+    ptyWrite(text + '\r', this.id);
   }
 
   /** 按键直通：可打印字符（含中文 IME 结果）。粘贴的多行按终端惯例换成回车。 */
   ptyType(text) {
     if (!this.pty || !text) return;
-    ptyWrite(String(text).replace(/\r?\n/g, '\r'));
+    ptyWrite(String(text).replace(/\r?\n/g, '\r'), this.id);
   }
 
   /** 按键直通：控制序列原始字节（\x03 / \x1b[A / \x7f …） */
   ptyKey(seq) {
     if (!this.pty || !seq) return;
-    ptyWrite(seq);
+    ptyWrite(seq, this.id);
   }
 
   get prompt() { return this.kind === 'cmd' ? `${this.cwd}>` : `PS ${this.cwd}> `; }
 
-  layout(r) { this.rect = r; }
   push(kind, text) {
     for (const l of String(text === undefined || text === null ? '' : text).split('\n')) {
       this.lines.push({ kind, text: l });
@@ -119,6 +142,7 @@ export class ShellPanel {
       this.push('info', 'clear 清屏 · ESC 中断 · ↑/↓ 翻命令历史 · pty <cmd> 开真终端（任意程序都行）');
       this.push('info', '交互式程序（python / node / ssh / vim…裸跑）会自动开真终端');
       this.push('info', '真终端 = 按键直通：^C 中断 · ^D 结束输入 · ^E 退出终端');
+      this.push('info', '多标签：^⇧T 新建 · ^Tab 切换 · ^⇧W 关闭（各标签互相独立）');
       return;
     }
     this.busy = true;
@@ -150,13 +174,13 @@ export class ShellPanel {
         if (this.mood.localSignals) this.mood.fromLocal('error', 'shell 出错');
         else this.mood.touch();
       }
-    });
+    }, undefined, this.id);
   }
 
   abort() {
-    if (this.pty) { ptyWrite('\x03'); return; }   // 真终端里：^C 就是中断当前程序
+    if (this.pty) { ptyWrite('\x03', this.id); return; }   // 真终端里：^C 就是中断当前程序
     if (!this.busy) return;
-    abortShell();
+    abortShell(this.id);
     try { this._cancel && this._cancel(); } catch (e) {}
     this.busy = false;
     this.push('info', '^C 已中断');
@@ -164,7 +188,7 @@ export class ShellPanel {
 
   /** ↑ / ↓：真终端里交给程序（命令历史），管道模式里翻本地命令历史（滚屏交给鼠标滚轮） */
   onArrow(dir) {
-    if (this.pty) { ptyWrite(dir > 0 ? '\x1b[A' : '\x1b[B'); return true; }
+    if (this.pty) { ptyWrite(dir > 0 ? '\x1b[A' : '\x1b[B', this.id); return true; }
     if (!this.hist.length) return true;
     // 用户又改了输入（跟上次回翻填进去的不一样）→ 重新开始浏览
     if (this.histIdx === -1 || this.input !== this._histShown) {
@@ -179,16 +203,14 @@ export class ShellPanel {
     return true;
   }
 
-  draw(g, C) {
+  /** 面板主体（不含外框：外框由 ShellPanel 画，标签栏在框外顶部） */
+  body(g, C) {
     const r = this.rect, T = C.theme;
     if (!r || r.w < 8 || r.h < 4) return;
-    const right = this.busy ? 'running' : (this.pty ? (this._ptyLabel || '真终端') : this.kind);
-    g.box(r.x, r.y, r.w, r.h, this.focus ? T.accent : T.line, T.panel,
-      this.pty ? 'TERM' : 'SHELL', T.accent, right);
     if (this.pty) return this.drawPty(g, C);
 
     const x = r.x + 1, iw = r.w - 2;
-    const viewH = r.h - 3;                 // 留 1 行输入 + 边框
+    const viewH = r.h - 3;                 // 留 1 行输入
     const prompt = this.prompt;
     const indent = '  ';
 
@@ -239,7 +261,7 @@ export class ShellPanel {
     if (vt.cols !== iw || vt.rows !== viewH) {
       vt.resize(iw, viewH);
       const now = Date.now();
-      if (now - this._resizeAt > 400) { this._resizeAt = now; ptyResize(iw, viewH); }
+      if (now - this._resizeAt > 400) { this._resizeAt = now; ptyResize(iw, viewH, this.id); }
     }
 
     const start = Math.max(0, vt.totalLines - viewH - p.scroll);
@@ -293,5 +315,177 @@ export class ShellPanel {
     }
     this.scroll = Math.max(0, Math.min(400, this.scroll + (d > 0 ? -1 : 1)));
     return true;
+  }
+}
+
+// ── 面板：标签栏 + 当前标签（对外 API 与单标签时代完全一致，主装配不用改）──
+export class ShellPanel {
+  constructor(mood) {
+    this.mood = mood;
+    this.rect = null;
+    this.tabs = [];
+    this.active = 0;
+    this._focus = false;
+    this._onLine = null;
+    this._tabHits = [];        // 最近一帧标签栏的命中区 [{x0,x1,idx}]，idx=-1 是“+”
+    this._seq = 0;
+    this.newTab();
+    this._reapStale();
+  }
+
+  // ── 当前标签 ──
+  get tab() { return this.tabs[this.active] || null; }
+  _nextId() { return 't' + (++this._seq) + Math.random().toString(36).slice(2, 6); }
+
+  /**
+   * 页面刚加载时，后端可能还挂着上次刷新遗留的标签会话（每个都占一个 pwsh/PTY 子进程）。
+   * 把不是本页的、以 't' 开头的会话收掉；默认会话 '0' 不动（老路径还在用）。
+   */
+  async _reapStale() {
+    try {
+      const r = await fetch('/api/sessions').then((x) => x.json());
+      const mine = new Set(this.tabs.map((t) => t.id));
+      for (const s of (r && r.sessions) || []) {
+        if (/^t/.test(s.id) && !mine.has(s.id)) ptyClose(s.id);
+      }
+    } catch (e) { /* 后端没起来就算了 */ }
+  }
+
+  // ── 转发给当前标签的属性（主装配按老接口用，不用感知多标签）──
+  get focus() { return this._focus; }
+  set focus(v) {
+    this._focus = !!v;
+    for (const t of this.tabs) t.focus = this._focus && t === this.tab;
+  }
+
+  get onLine() { return this._onLine; }
+  set onLine(fn) { this._onLine = fn; for (const t of this.tabs) t.onLine = fn; }
+
+  get input() { return this.tab ? this.tab.input : ''; }
+  set input(v) { if (this.tab) this.tab.input = v; }
+  get caret() { return this.tab ? this.tab.caret : 0; }
+  set caret(v) { if (this.tab) this.tab.caret = v; }
+  get ime() { return this.tab ? this.tab.ime : null; }
+  set ime(v) { if (this.tab) this.tab.ime = v; }
+  get prompt() { return this.tab ? this.tab.prompt : ''; }
+  get kind() { return this.tab ? this.tab.kind : 'pwsh'; }
+  get cwd() { return this.tab ? this.tab.cwd : ''; }
+  get lines() { return this.tab ? this.tab.lines : []; }
+  get busy() { return this.tab ? this.tab.busy : false; }
+
+  // ── 转发给当前标签的方法 ──
+  layout(r) { this.rect = r; this._syncRect(); }
+  inPty() { return !!(this.tab && this.tab.inPty()); }
+  exec(text) { return this.tab ? this.tab.exec(text) : undefined; }
+  abort() { if (this.tab) this.tab.abort(); }
+  sendToPty(t) { if (this.tab) this.tab.sendToPty(t); }
+  ptyType(t) { if (this.tab) this.tab.ptyType(t); }
+  ptyKey(s) { if (this.tab) this.tab.ptyKey(s); }
+  leavePty(reason) { if (this.tab) this.tab.leavePty(reason); }
+  enterPty(cmd) { return this.tab ? this.tab.enterPty(cmd) : undefined; }
+  onArrow(dir) { return this.tab ? this.tab.onArrow(dir) : true; }
+  onWheel(d) { return this.tab ? this.tab.onWheel(d) : false; }
+  push(kind, text) { if (this.tab) this.tab.push(kind, text); }
+
+  // ── 标签管理 ──
+  newTab() {
+    if (this.tabs.length >= MAX_TABS) return null;
+    const t = new ShellTab(this.mood, this._nextId(), this.tabs.length + 1);
+    t.onLine = this._onLine;
+    this.tabs.push(t);
+    this.active = this.tabs.length - 1;
+    this._syncRect();
+    this.syncFocus();
+    return t;
+  }
+
+  selectTab(i) {
+    if (typeof i !== 'number' || i < 0 || i >= this.tabs.length) return false;
+    if (i === this.active) return false;
+    this.active = i;
+    this.syncFocus();
+    return true;
+  }
+
+  /** dir>0 下一个，dir<0 上一个（循环） */
+  nextTab(dir) {
+    const n = this.tabs.length;
+    if (n < 2) return false;
+    this.active = (this.active + (dir > 0 ? 1 : -1) + n) % n;
+    this.syncFocus();
+    return true;
+  }
+
+  closeTab(i) {
+    if (this.tabs.length <= 1) return false;            // 留最后一个，别把面板清空
+    const k = (i === undefined || i === null) ? this.active : i;
+    if (k < 0 || k >= this.tabs.length) return false;
+    this.tabs[k].dispose();
+    this.tabs.splice(k, 1);
+    if (k < this.active) this.active--;
+    if (this.active >= this.tabs.length) this.active = this.tabs.length - 1;
+    this.syncFocus();
+    return true;
+  }
+
+  /** 命中标签栏：返回标签下标；-1 = “+”新建；null = 没点标签栏 */
+  tabAt(x, y) {
+    for (const h of this._tabHits) if (x >= h.x0 && x <= h.x1) return h.idx;
+    return null;
+  }
+
+  /** 标签栏在 SHELL 框**外**：紧贴在框顶线上面那一行 */
+  tabBarRow() { return this.rect ? this.rect.y - 1 : -1; }
+
+  syncFocus() {
+    for (const t of this.tabs) t.focus = this._focus && t === this.tab;
+    this._syncRect();
+  }
+
+  _syncRect() {
+    const r = this.rect;
+    if (!r) return;
+    // 标签栏搬到框外了 → 框内空间整块还给终端正文（tab.rect = 整框）
+    for (const t of this.tabs) t.rect = { x: r.x, y: r.y, w: r.w, h: r.h };
+  }
+
+  draw(g, C) {
+    const r = this.rect, T = C.theme;
+    if (!r || r.w < 12 || r.h < 4) return;
+    g.box(r.x, r.y, r.w, r.h, this._focus ? T.accent : T.line, T.panel,
+      'SHELL', T.accent, `${this.active + 1}/${this.tabs.length}`);
+    const tab = this.tab;
+    if (tab) { tab.rect = { x: r.x, y: r.y, w: r.w, h: r.h }; tab.focus = this._focus; tab.body(g, C); }
+  }
+
+  /**
+   * 标签栏画在 SHELL 框的顶部边缘线**之上**那一行（框外）。
+   * 必须晚于全局 chrome 的分隔线绘制，否则会被那行 '─' 盖掉（见 main.js 的调用点）。
+   */
+  drawTabBar(g, C) {
+    const r = this.rect, T = C.theme;
+    if (!r) return;
+    const y = r.y - 1;
+    if (y < 0) return;
+    this._tabHits = [];
+    const maxX = r.x + r.w;                      // 独占：[r.x, r.x+r.w)
+    let x = r.x;
+    for (let i = 0; i < this.tabs.length; i++) {
+      const label = ` ${i + 1} ${this.tabs[i].title()} `;
+      const w = g.strWidth(label);
+      if (x + w > maxX - 3) { g.text(x, y, '…', T.darker, T.bg); x += 1; break; }
+      const on = i === this.active;
+      // 活动标签用实心色块（反色），“挂在”顶线上；非活动做成低调的小片
+      g.text(x, y, label, on ? T.bg : T.dim, on ? T.accent : T.panel);
+      this._tabHits.push({ x0: x, x1: x + w - 1, idx: i });
+      x += w;
+    }
+    if (this.tabs.length < MAX_TABS && x + 3 <= maxX) {
+      g.text(x, y, ' + ', T.dim, T.bg);
+      this._tabHits.push({ x0: x, x1: x + 2, idx: -1 });
+      x += 3;
+    }
+    // 剩下的部分让原来的顶部分隔线继续延伸，看起来就是“标签挂在线上”
+    while (x < maxX) { g.set(x, y, '─', T.line, T.bg); x++; }
   }
 }

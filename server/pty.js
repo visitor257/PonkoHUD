@@ -11,7 +11,8 @@ const BRIDGE = path.join(__dirname, 'ptybridge.py');
 const PY = process.env.PONKO_PY || 'python';
 
 class PtySession {
-  constructor() {
+  constructor(id = '0') {
+    this.id = id;              // 会话 id = 前端那个标签的 id，日志/调试用
     this.proc = null;
     this.running = false;
     this.gen = 0;              // 会话代际：每次 start 自增，用于隔离旧会话的残响事件
@@ -181,4 +182,51 @@ class PtySession {
   }
 }
 
-module.exports = { pty: new PtySession(), PtySession };
+// ── 会话表：一个标签 = 一个 PtySession ───────────────────────────────────
+// 以前这里导出的是**唯一**那个实例；现在按 id 存取，默认会话仍叫 '0'，
+// 所以只用一个 shell 的老路径（不带 session 参数的请求）行为不变。
+const ID_RE = /^[A-Za-z0-9_-]{1,24}$/;
+const MAX_SESSIONS = 12;
+
+/** 把任意输入规整成合法会话 id；非法/空值一律落到默认会话 '0' */
+function normSession(id) {
+  const s = String(id === undefined || id === null ? '' : id);
+  return ID_RE.test(s) ? s : '0';
+}
+
+const sessions = new Map();
+
+/** 取会话；create=false 时只查不建（status/stream 这类只读路径不该凭空造会话） */
+function getSession(id, create = true) {
+  const k = normSession(id);
+  let s = sessions.get(k);
+  if (!s && create) {
+    if (sessions.size >= MAX_SESSIONS) return null;
+    s = new PtySession(k);
+    sessions.set(k, s);
+  }
+  return s || null;
+}
+
+/** 关掉并移除一个会话（含其子进程），最后一个标签关掉时前端会调它 */
+function dropSession(id) {
+  const k = normSession(id);
+  const s = sessions.get(k);
+  if (!s) return false;
+  try { s.stop(); } catch (e) { /* 桥可能已经走了 */ }
+  sessions.delete(k);
+  return true;
+}
+
+function listSessions() {
+  return [...sessions.values()].map((s) => ({
+    id: s.id, running: s.running, shell: s.shell, error: s.lastError || '',
+  }));
+}
+
+const defaultSession = getSession('0');
+
+module.exports = {
+  pty: defaultSession, PtySession,
+  getSession, dropSession, listSessions, normSession, MAX_SESSIONS,
+};

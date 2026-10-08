@@ -143,17 +143,31 @@ def ensure_backend(port: int) -> None:
 
 
 def stop_backend() -> None:
+    """Never block the exit path: kill immediately, then sweep children in the background.
+
+    以前这里跑 ``taskkill ... timeout=10`` 同步等，机器上实测出现过 TimeoutExpired
+    （日志里那行 backend kill failed）—— 退出时白等 10 秒，看着就像"卡死"。
+    现在：先 fire-and-forget 起 taskkill /t（趁 node 还活着才能枚举到 pwsh 等子进程），
+    再 TerminateProcess 立刻收掉 node —— 整条路径最多 ~0.2s，绝不阻塞退出。
+    """
     global _backend_proc, _backend_owned
     if _backend_proc and _backend_owned:
+        pid = _backend_proc.pid
         try:
-            subprocess.run(
-                ["taskkill", "/pid", str(_backend_proc.pid), "/t", "/f"],
-                capture_output=True,
-                timeout=10,
+            subprocess.Popen(
+                ["taskkill", "/pid", str(pid), "/t", "/f"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=CREATE_NO_WINDOW,
             )
-            _log("[host] backend stopped")
+            time.sleep(0.15)        # 给 taskkill 一点时间枚举进程树
         except Exception as e:  # noqa: BLE001
-            _log(f"[host] backend kill failed: {e!r}")
+            _log(f"[host] backend taskkill spawn failed: {e!r}")
+        try:
+            _backend_proc.kill()
+        except Exception as e:  # noqa: BLE001
+            _log(f"[host] backend terminate failed: {e!r}")
+        _log(f"[host] backend stopped (pid {pid})")
         _backend_proc = None
         _backend_owned = False
     remove_pid("backend.pid")
@@ -286,6 +300,64 @@ def screen_size() -> tuple[int, int]:
 
 
 # --------------------------------------------------------------------------- #
+# UI bridge (pywebview JS API) -- the page's own "退出" button calls into this
+# --------------------------------------------------------------------------- #
+class UIApi:
+    """Exposed to the page as ``window.pywebview.api``.
+
+    The HUD runs fullscreen / borderless, so there is no native title bar with a
+    close button. The page draws its own "退出" button and calls ``quit()`` here;
+    destroying the window makes ``webview.start`` return, and this host then tears
+    the node backend down in its ``finally`` block (same as stop.bat, but in-app).
+
+    !! 只许有 public *方法*，别的属性一律加下划线 !!
+    pywebview 造 JS API 时会 dir() 这个对象，并把所有"非 callable 的 public 属性"
+    递归扫进 .NET 对象图（util.get_functions）。之前窗口存在 self.window 上，于是
+    它顺着 Window -> .native（WinForms 窗体）一路 getattr：几百个跨线程 COM 取值、
+    "maximum recursion depth exceeded"，最后 finish_script 根本没来得及执行 ——
+    页面上压根没有 window.pywebview.api，退出按钮自然点什么都没反应。
+    """
+
+    def __init__(self) -> None:
+        self._window = None          # 不能叫 self.window（见类注释）
+        self._quitting = False
+        self._lock = threading.Lock()
+
+    def quit(self) -> bool:
+        """页面「退出」按钮 / ^⇧Q 走这里。立刻返回，真正的收尾交给 helper 线程。"""
+        with self._lock:
+            if self._quitting:
+                return True          # 连点两次只收尾一次
+            self._quitting = True
+
+        _log("[host] quit requested from the UI")
+        threading.Thread(target=self._teardown, name="ponko-quit", daemon=True).start()
+        return True
+
+    def _teardown(self) -> None:
+        # 1) 让上面那个 return 的写回（pywebview 把结果 evaluate_js 回页面）先跑完，
+        #    免得 window.destroy() 跟它抢 UI 线程。
+        time.sleep(0.3)
+        try:
+            if self._window is not None:
+                self._window.destroy()
+                _log("[host] window destroyed")
+        except Exception as e:  # noqa: BLE001
+            _log(f"[host] window.destroy failed: {e!r}")
+
+        # 2) 兜底：窗口消失后再给主线程 2s 走完 finally / atexit；还活着就是卡住了，
+        #    直接把后端收了硬退 —— 绝不留"点了退出程序不动"的状态。
+        for _ in range(16):
+            if not list_windows(APP_TITLE, pid=os.getpid()):
+                break
+            time.sleep(0.5)
+        time.sleep(2.0)
+        _log("[host] quit watchdog: forcing exit")
+        stop_backend()
+        os._exit(0)
+
+
+# --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
 def main() -> None:
@@ -306,7 +378,11 @@ def main() -> None:
     if not acquire_single_instance():
         if focus_existing():
             _log("[host] already running, raised existing window")
-            sys.exit(0)
+        else:
+            # 之前这里会继续往下走，于是桌上叠出第二个全屏窗口（日志 16:02:52 那次）。
+            # 已经有一个实例占着互斥体，就不再开新窗口，直接退出。
+            _log("[host] another instance holds the mutex but its window was not found; exiting")
+        sys.exit(0)
 
     if not args.no_backend:
         ensure_backend(args.port)
@@ -329,6 +405,9 @@ def main() -> None:
 
     url = f"http://127.0.0.1:{args.port}/index.html{args.query}"
 
+    # JS bridge: page's "退出" button -> window.destroy() -> clean shutdown
+    api = UIApi()
+
     if args.windowed:
         # old windowed behaviour: a resizable box centred on the screen
         width = max(1000, min(1680, sw - 120))
@@ -346,6 +425,7 @@ def main() -> None:
             on_top=args.always_on_top,
             background_color="#070C10",
             text_select=True,
+            js_api=api,
         )
     else:
         # default: fullscreen, borderless, covering the whole primary display
@@ -361,7 +441,10 @@ def main() -> None:
             on_top=False,
             background_color="#070C10",
             text_select=True,
+            js_api=api,
         )
+
+    api._window = window
 
     threading.Thread(target=window_decorator, daemon=True).start()
 

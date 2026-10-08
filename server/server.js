@@ -13,7 +13,8 @@ const { spawn } = require('child_process');
 const sysinfo = require('./sysinfo');
 const netgeo = require('./netgeo');
 const moodp = require('./moodprotocol');
-const { pty } = require('./pty');
+const { PtySession, getSession: getPtySession, dropSession: dropPtySession,
+  listSessions: listPtySessions, normSession } = require('./pty');
 
 // ─────────────────────────────── LLM 接入配置（本地持久化到 llm-config.json）
 // 用户在前端填 API 地址 / API Key / 模型；配好后 /api/agent 改走真 LLM 流式调用。
@@ -236,27 +237,75 @@ function readBody(req) {
 // 之后所有命令都被喂给它（"is not recognized as an internal or external command"），
 // 而且哨兵行被吞导致退出码永远是 0 —— 整个会话废掉。故必须拦截。
 const SENTINEL = 'PONKO_DONE_9f3c';
-let sh = null, shBuf = '', shState = 'idle';   // idle | busy
-let shellKind = 'pwsh';                        // pwsh | cmd
-let curDir = process.env.USERPROFILE || 'C:\\';
-let activeProc = null;                         // CMD 模式下的一次性进程
+
+// ── 终端会话：一个标签 = 一个 ShellSession ──────────────────────────────
+// 以前 sh/shellKind/curDir 等都是模块级全局变量，全窗口只有一路 shell。
+// 现在收进会话对象：每个标签有自己的持久 pwsh、自己的 cwd/shell 种类、自己的 PTY，
+// 切标签互不干扰。默认会话 id '0'，不带 session 参数的老请求都落到它身上。
+class ShellSession {
+  constructor(id) {
+    this.id = id;
+    this.kind = 'pwsh';                                   // pwsh | cmd（原 shellKind）
+    this.cwd = process.env.USERPROFILE || 'C:\\';         // 原 curDir
+    this.sh = null;                                       // 管道模式的持久 pwsh 进程
+    this.shBuf = '';                                      // 原 shBuf
+    this.shState = 'idle';                                // idle | busy
+    this.activeProc = null;                               // CMD 模式下的一次性进程
+    this.pty = new PtySession(id);                        // 真终端会话
+  }
+}
+
+const MAX_SESSIONS = 12;
+const sessionStore = new Map();
+
+/** 取会话；create=false 时只查不建 */
+function getSess(id, create = true) {
+  const k = normSession(id);
+  let s = sessionStore.get(k);
+  if (!s && create) {
+    if (sessionStore.size >= MAX_SESSIONS) return null;
+    s = new ShellSession(k);
+    sessionStore.set(k, s);
+  }
+  return s || null;
+}
+
+/** 关掉一个会话：连它的 pwsh 子进程、跑着的命令、PTY 一起收掉 */
+function dropSess(id) {
+  const k = normSession(id);
+  const s = sessionStore.get(k);
+  if (!s) return false;
+  try { if (s.sh) s.sh.kill(); } catch (e) { /* 已退出 */ }
+  try { if (s.activeProc) s.activeProc.kill(); } catch (e) { /* 已退出 */ }
+  try { dropPtySession(k); } catch (e) { /* 桥可能已经走了 */ }
+  sessionStore.delete(k);
+  return true;
+}
+
+function listSess() {
+  return [...sessionStore.values()].map((s) => ({
+    id: s.id, cwd: s.cwd, shell: s.kind, state: s.shState,
+    running: !!(s.sh && s.shState === 'busy') || !!(s.activeProc),
+  }));
+}
 
 // 裸跑（不带参数）会抢 stdin 的交互式程序
 const REPL_BLOCK = new Set(['python', 'python3', 'py', 'node', 'ipython', 'ssh', 'ftp', 'sftp', 'telnet',
   'nslookup', 'mysql', 'psql', 'sqlite3', 'diskpart', 'regedit', 'wsl', 'bash', 'sh', 'zsh',
   'more', 'less', 'vim', 'nvim', 'nano', 'emacs', 'top', 'htop', 'tmux', 'ranger', 'notepad']);
 
-function spawnShell() {
-  if (sh) { try { sh.kill(); } catch (e) {} sh = null; }
-  sh = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '-'], {
-    cwd: curDir,
+function spawnShell(sess) {
+  if (sess.sh) { try { sess.sh.kill(); } catch (e) {} sess.sh = null; }
+  sess.sh = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '-'], {
+    cwd: sess.cwd,
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
-  shBuf = '';
+  const sh = sess.sh;
+  sess.shBuf = '';
   sh.stdout.setEncoding('utf8');
   sh.stderr.setEncoding('utf8');
-  sh.on('exit', () => { sh = null; });
+  sh.on('exit', () => { if (sess.sh === sh) sess.sh = null; });
 
   // ── 中文编码：Windows PowerShell 5.1 的管道是 ANSI(936)，两头都会坏
   //   · 输出侧：强制 UTF-8，否则文件名 / 错误消息等"系统产生的中文"会变成 GBK 字节
@@ -267,12 +316,14 @@ function spawnShell() {
   sh.stdin.write('$OutputEncoding=[System.Text.Encoding]::UTF8\n');
   sh.stdin.write('$ProgressPreference="SilentlyContinue"; $ErrorActionPreference="Continue"\n');
   // 就绪前吃掉初始化期的所有输出
-  const swallow = (c) => { if (!sh || !sh.ready) { shBuf = ''; return; } };
+  const swallow = (c) => { if (!sh.ready) { sess.shBuf = ''; return; } };
   sh.stdout.on('data', swallow);
-  setTimeout(() => { if (sh) { sh.stdout.off('data', swallow); sh.ready = true; shBuf = ''; } }, 400);
+  setTimeout(() => {
+    if (sess.sh === sh) { sh.stdout.off('data', swallow); sh.ready = true; sess.shBuf = ''; }
+  }, 400);
   return sh;
 }
-spawnShell();
+spawnShell(getSess('0'));
 
 // cmd 输出用的是系统 ANSI 代码页（chcp 对管道无效，实测），所以在 Node 侧按该代码页解码。
 // 中文命令则走 argv（UTF-16），不受影响 —— 两边分开治。
@@ -284,7 +335,7 @@ try {
 } catch (e) { /* 保持 gbk */ }
 
 // CMD 模式：一次性 cmd /c（cwd 用 spawn 的 cwd 选项，命令里不再拼路径）
-function runCmdOnce(cmd, onLine, onExit) {
+function runCmdOnce(sess, cmd, onLine, onExit) {
   // 三处 cmd 特性必须同时满足，缺一个就坏：
   //  · /s + 外层引号 + windowsVerbatimArguments —— 否则 Node 把 " 转义成 \"（cmd 不认反斜杠转义）
   //  · /V:ON + !VAR! —— cmd /c 立即模式下 & 链里的 %VAR% 在**执行前**就全展开完，
@@ -292,11 +343,11 @@ function runCmdOnce(cmd, onLine, onExit) {
   //  · 先 set 捕获 ERRORLEVEL，因为后面的 echo 会把它重置成 0
   const full = `${cmd} & set "EC=!ERRORLEVEL!" & echo PONKO_CWD:!CD! & echo PONKO_DONE:!EC!`;
   const p = spawn('cmd.exe', ['/V:ON', '/s', '/c', `"${full}"`], {
-    cwd: curDir, windowsHide: true, windowsVerbatimArguments: true,
+    cwd: sess.cwd, windowsHide: true, windowsVerbatimArguments: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  activeProc = p;
-  shState = 'busy';
+  sess.activeProc = p;
+  sess.shState = 'busy';
   let buf = '', done = false, code = 0;
   const dec = new TextDecoder(cmdEnc);
   const timer = setTimeout(() => {
@@ -310,7 +361,7 @@ function runCmdOnce(cmd, onLine, onExit) {
       const line = buf.slice(0, i).replace(/\r$/, '');
       buf = buf.slice(i + 1);
       const mc = line.match(/^PONKO_CWD:(.*)$/);
-      if (mc) { if (mc[1]) curDir = mc[1].trim(); onLine(curDir, 'cwd'); continue; }
+      if (mc) { if (mc[1]) sess.cwd = mc[1].trim(); onLine(sess.cwd, 'cwd'); continue; }
       const md = line.match(/PONKO_DONE:(-?\d+)/);
       if (md) { code = Number(md[1]); return; }
       onLine(line, 'out');
@@ -324,25 +375,28 @@ function runCmdOnce(cmd, onLine, onExit) {
   p.on('exit', () => {
     if (done) return;
     done = true; clearTimeout(timer); flush();
-    activeProc = null; shState = 'idle';
+    if (sess.activeProc === p) sess.activeProc = null;
+    sess.shState = 'idle';
     onExit(code, null);
   });
   p.on('error', (e) => {
     if (done) return;
-    done = true; clearTimeout(timer); activeProc = null; shState = 'idle';
+    done = true; clearTimeout(timer);
+    if (sess.activeProc === p) sess.activeProc = null;
+    sess.shState = 'idle';
     onExit(-1, String(e && e.message || e));
   });
 }
 
 // 往持久会话写命令：必须走 base64（stdin 是 ANSI 编码，直接写中文会被解烂）
-function pwshSend(psCmd) {
-  if (!sh || !sh.stdin.writable) return;
+function pwshSend(sess, psCmd) {
+  if (!sess.sh || !sess.sh.stdin.writable) return;
   const b64 = Buffer.from(psCmd, 'utf8').toString('base64');
-  sh.stdin.write(`Invoke-Expression ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("${b64}")))\n`);
+  sess.sh.stdin.write(`Invoke-Expression ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("${b64}")))\n`);
 }
 
-function pwshCd(dir) {
-  pwshSend(`Set-Location -LiteralPath "${String(dir).replace(/"/g, '`"')}" -ErrorAction SilentlyContinue`);
+function pwshCd(sess, dir) {
+  pwshSend(sess, `Set-Location -LiteralPath "${String(dir).replace(/"/g, '`"')}" -ErrorAction SilentlyContinue`);
 }
 
 // 把一行命令拆成 argv（处理双/单引号），供 pty.startProgram 直接跑程序
@@ -359,7 +413,7 @@ function splitArgs(s) {
 }
 
 // 命令分发：先处理 shell 切换 / 交互式拦截，再交给对应执行器
-function runCommand(cmd, onLine, onExit) {
+function runCommand(sess, cmd, onLine, onExit) {
   const raw = String(cmd || '').trim();
   const tok0 = (raw.split(/\s+/)[0] || '').toLowerCase().replace(/^["']|["']$/g, '');
   const bare = tok0.replace(/\.(exe|com|bat|cmd)$/, '');
@@ -368,15 +422,15 @@ function runCommand(cmd, onLine, onExit) {
   // ── 切换 shell（裸 cmd / powershell）
   if (noArgs && (bare === 'cmd' || bare === 'powershell' || bare === 'pwsh')) {
     const want = bare === 'cmd' ? 'cmd' : 'pwsh';
-    if (shellKind === want) {
+    if (sess.kind === want) {
       onLine(want === 'cmd' ? '已经在 CMD 模式了。输入 powershell 切回 PowerShell。'
         : '已经在 PowerShell 模式了。输入 cmd 切到 CMD。', 'info');
       return onExit(0, null);
     }
-    shellKind = want;
-    curDir = curDir || 'C:\\';
-    if (want === 'pwsh') pwshCd(curDir);   // 把 CMD 期间改变的目录同步回持久会话
-    onLine(shellKind, 'shell');
+    sess.kind = want;
+    sess.cwd = sess.cwd || 'C:\\';
+    if (want === 'pwsh') pwshCd(sess, sess.cwd);   // 把 CMD 期间改变的目录同步回持久会话
+    onLine(sess.kind, 'shell');
     onLine(want === 'cmd'
       ? '已切到 CMD 模式：cd 保持，但 set 的环境变量不跨命令保留。输入 powershell 或 exit 切回。'
       : '已切回 PowerShell 模式（持久会话，cd 和变量都保留）。', 'info');
@@ -385,14 +439,14 @@ function runCommand(cmd, onLine, onExit) {
 
   // ── exit：CMD 模式下等于退回 PowerShell
   if (noArgs && (bare === 'exit' || bare === 'quit')) {
-    if (shellKind === 'cmd') {
-      shellKind = 'pwsh';
-      pwshCd(curDir);
-      onLine(shellKind, 'shell');
+    if (sess.kind === 'cmd') {
+      sess.kind = 'pwsh';
+      pwshCd(sess, sess.cwd);
+      onLine(sess.kind, 'shell');
       onLine('已退回 PowerShell 模式。', 'info');
       return onExit(0, null);
     }
-    onLine('这是持久 PowerShell 会话，exit 会关掉整个会话。要退出程序请运行 stop.bat。', 'info');
+    onLine('这是持久 PowerShell 会话，exit 会关掉整个会话。要退出程序：点右上角「✕ 退出」或按 ^⇧Q（或运行 stop.bat）。', 'info');
     return onExit(0, null);
   }
 
@@ -401,14 +455,14 @@ function runCommand(cmd, onLine, onExit) {
     const inner = raw.slice(tok0.length).trim() || 'powershell';
     const parts = splitArgs(inner);
     const first = (parts[0] || '').toLowerCase().replace(/^["']|["']$/g, '').replace(/\.(exe|com|bat|cmd)$/, '');
-    const ptyOpts = { cwd: curDir,
+    const ptyOpts = { cwd: sess.cwd,
       cols: Number(process.env.PONKO_PTY_COLS || 100), rows: Number(process.env.PONKO_PTY_ROWS || 30) };
     // 想要一个真终端（开 shell）→ 直接起 shell（不再在里面重复跑一遍同名 shell）；
     // 想把某个程序放真终端跑 → 直接跑，退出即回本 shell
     const isShell = first === 'pwsh' || first === 'powershell' || first === 'cmd';
     const p = isShell
-      ? pty.start({ ...ptyOpts, shell: first === 'cmd' ? 'cmd' : 'pwsh' })
-      : pty.startProgram(parts, ptyOpts);
+      ? sess.pty.start({ ...ptyOpts, shell: first === 'cmd' ? 'cmd' : 'pwsh' })
+      : sess.pty.startProgram(parts, ptyOpts);
     p.then((r) => { if (!r.ok) onLine('PTY 启动失败：' + (r.msg || '未知原因'), 'err'); });
     onLine('__pty__', 'pty');            // 通知前端：切到终端渲染模式
     return onExit(0, null);
@@ -418,7 +472,7 @@ function runCommand(cmd, onLine, onExit) {
   // 直接在 PTY 里跑程序本身（不是先起一层 shell）：程序退出即 PTY 结束，自动回到当前 shell，
   // 不会让用户"莫名其妙掉进第二个 cmd/pwsh，还得再 exit 一次"。
   if (noArgs && REPL_BLOCK.has(bare)) {
-    pty.startProgram([bare], { cwd: curDir,
+    sess.pty.startProgram([bare], { cwd: sess.cwd,
       cols: Number(process.env.PONKO_PTY_COLS || 100), rows: Number(process.env.PONKO_PTY_ROWS || 30) })
       .then((r) => {
         if (!r.ok) {
@@ -430,70 +484,78 @@ function runCommand(cmd, onLine, onExit) {
     return onExit(0, null);
   }
   // CMD 模式下裸 powershell 同理（不带参数就是进 REPL）
-  if (shellKind === 'cmd' && noArgs && bare === 'powershell') { /* 上面已处理 */ }
+  if (sess.kind === 'cmd' && noArgs && bare === 'powershell') { /* 上面已处理 */ }
 
-  if (shellKind === 'cmd') return runCmdOnce(raw, onLine, onExit);
-  return runPwsh(raw, onLine, onExit);
+  if (sess.kind === 'cmd') return runCmdOnce(sess, raw, onLine, onExit);
+  return runPwsh(sess, raw, onLine, onExit);
 }
 
-function runPwsh(cmd, onLine, onExit) {
-  if (!sh) spawnShell();
-  if (!sh.ready) { setTimeout(() => runPwsh(cmd, onLine, onExit), 120); return; }
-  shState = 'busy';
+function runPwsh(sess, cmd, onLine, onExit) {
+  if (!sess.sh) spawnShell(sess);
+  if (!sess.sh.ready) { setTimeout(() => runPwsh(sess, cmd, onLine, onExit), 120); return; }
+  const sh = sess.sh;
+  sess.shState = 'busy';
   let done = false;
   const timer = setTimeout(() => {
     if (!done) {
       done = true; cleanup();
       // 超时多半是命令抢占了 stdin（会话已不可信），必须重建
-      try { sh.kill(); } catch (e) {} sh = null; spawnShell();
+      try { sh.kill(); } catch (e) {}
+      if (sess.sh === sh) sess.sh = null;
+      spawnShell(sess);
       onExit(-1, 'timeout');
     }
   }, 60000);
 
   function onData(chunk) {
-    shBuf += chunk;
+    sess.shBuf += chunk;
     let idx;
-    while ((idx = shBuf.indexOf('\n')) >= 0) {
-      const line = shBuf.slice(0, idx).replace(/\r$/, '');
-      shBuf = shBuf.slice(idx + 1);
+    while ((idx = sess.shBuf.indexOf('\n')) >= 0) {
+      const line = sess.shBuf.slice(0, idx).replace(/\r$/, '');
+      sess.shBuf = sess.shBuf.slice(idx + 1);
       if (line.includes(SENTINEL)) {
         const m = line.match(/PONKO_DONE_9f3c:(-?\d+)/);
         if (!done) { done = true; cleanup(); onExit(m ? Number(m[1]) : 0, null); }
         return;
       }
       const cwd = line.match(/^PONKO_CWD:(.*)$/);
-      if (cwd) { if (cwd[1]) curDir = cwd[1]; if (!done) onLine(curDir, 'cwd'); return; }
+      if (cwd) { if (cwd[1]) sess.cwd = cwd[1]; if (!done) onLine(sess.cwd, 'cwd'); return; }
       if (!done) onLine(line, 'out');
     }
   }
   function onErr(chunk) {
-    shBuf += chunk; // stderr 与 stdout 交错，统一按行处理
+    sess.shBuf += chunk; // stderr 与 stdout 交错，统一按行处理
     onData('');
   }
   function cleanup() {
     clearTimeout(timer);
-    if (sh) { sh.stdout.off('data', onData); sh.stderr.off('data', onErr); }
-    shState = 'idle';
+    sh.stdout.off('data', onData);
+    sh.stderr.off('data', onErr);
+    sess.shState = 'idle';
   }
 
   sh.stdout.on('data', onData);
   sh.stderr.on('data', onErr);
   // 命令经 base64 传入（绕开 stdin 的 ANSI 编码），PowerShell 侧解码后执行
-  pwshSend(cmd);
+  pwshSend(sess, cmd);
   // 顺带回传当前目录，前端提示符才能跟着 cd 变
   sh.stdin.write('Write-Output "PONKO_CWD:$((Get-Location).Path)"\n');   // 纯 ASCII，可直接写
   sh.stdin.write(`Write-Output "${SENTINEL}:$LASTEXITCODE"\n`);
 }
 
-function killCommand() {
-  if (shellKind === 'cmd') {
-    if (activeProc) { try { activeProc.kill(); } catch (e) {} activeProc = null; shState = 'idle'; return true; }
+function killCommand(sess) {
+  if (sess.kind === 'cmd') {
+    if (sess.activeProc) {
+      try { sess.activeProc.kill(); } catch (e) {}
+      sess.activeProc = null; sess.shState = 'idle'; return true;
+    }
     return false;
   }
-  if (sh && shState === 'busy') {
-    try { sh.kill(); } catch (e) {}
-    spawnShell();
-    shState = 'idle';
+  if (sess.sh && sess.shState === 'busy') {
+    try { sess.sh.kill(); } catch (e) {}
+    sess.sh = null;
+    spawnShell(sess);
+    sess.shState = 'idle';
     return true;
   }
   return false;
@@ -806,7 +868,15 @@ const server = http.createServer(async (req, res) => {
   try {
     if (p === '/api/sys') return sendJson(res, sysinfo.snapshot());
     // shell 当前状态（前端面板启动时拉一次，避免首屏用写死的 C:\）
-    if (p === '/api/shell/state') return sendJson(res, { cwd: curDir, shell: shellKind });
+    if (p === '/api/shell/state') {
+      const s = getSess(u.searchParams.get('s'));
+      if (!s) return sendJson(res, { cwd: '', shell: 'pwsh', error: '会话数已达上限' });
+      return sendJson(res, { cwd: s.cwd, shell: s.kind, session: s.id });
+    }
+    // 会话清单：前端可用来对账（每个标签一个）
+    if (p === '/api/sessions') {
+      return sendJson(res, { sessions: listSess(), pty: listPtySessions(), max: MAX_SESSIONS });
+    }
     // LLM 接入配置：GET 拿当前（不回传明文 key），POST 保存（写 llm-config.json）
     if (p === '/api/llm/config' && req.method === 'GET') return sendJson(res, publicLlmCfg());
     if (p === '/api/llm/config' && req.method === 'POST') {
@@ -844,7 +914,15 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/api/shell' && req.method === 'POST') {
       const body = JSON.parse((await readBody(req)) || '{}');
-      if (body.abort) return sendJson(res, { aborted: killCommand() });
+      // 中断：只查不建（别为了点一下中断就凭空造出一个会话）
+      if (body.abort) {
+        const s = getSess(body.session, false);
+        return sendJson(res, { aborted: s ? killCommand(s) : false });
+      }
+      const s = getSess(body.session);
+      if (!s) {
+        return sendJson(res, { ok: false, error: '会话数已达上限（' + MAX_SESSIONS + '）' });
+      }
       res.writeHead(200, {
         'Content-Type': 'application/x-ndjson; charset=utf-8',
         'Cache-Control': 'no-cache',
@@ -852,11 +930,11 @@ const server = http.createServer(async (req, res) => {
       });
       // 先把当前 shell 类型 + 真实工作目录同步给前端（前端默认写的 C:\ 是错的，
       // 真实会话起始在 USERPROFILE；命令执行后还会再发一次 cwd 反映 cd 结果）
-      res.write(JSON.stringify({ t: 'shell', text: shellKind }) + '\n');
-      res.write(JSON.stringify({ t: 'cwd', text: curDir }) + '\n');
-      runCommand(body.cmd || '',
-        (line, kind) => res.write(JSON.stringify({ t: kind, text: line }) + '\n'),
-        (code, err) => { res.write(JSON.stringify({ t: 'exit', code, error: err }) + '\n'); res.end(); });
+      res.write(JSON.stringify({ t: 'shell', text: s.kind, session: s.id }) + '\n');
+      res.write(JSON.stringify({ t: 'cwd', text: s.cwd, session: s.id }) + '\n');
+      runCommand(s, body.cmd || '',
+        (line, kind) => res.write(JSON.stringify({ t: kind, text: line, session: s.id }) + '\n'),
+        (code, err) => { res.write(JSON.stringify({ t: 'exit', code, error: err, session: s.id }) + '\n'); res.end(); });
       return;
     }
 
@@ -865,37 +943,48 @@ const server = http.createServer(async (req, res) => {
       return await streamAgent(res, body.text || '', body.history || []);
     }
 
-    // ── PTY：真终端会话（交互式程序专用）
+    // ── PTY：真终端会话（每个标签一份；session 省略即默认会话 '0'）
     if (p === '/api/pty' && req.method === 'POST') {
       const b = JSON.parse((await readBody(req)) || '{}');
+      // 关闭会话必须在"取会话"之前处理，否则 getSess 又会把它建回来
+      if (b.op === 'close') return sendJson(res, { ok: dropSess(b.session) });
+      const s = getSess(b.session);
+      if (!s) return sendJson(res, { ok: false, msg: '会话数已达上限（' + MAX_SESSIONS + '）' });
+      const P = s.pty;
       if (b.op === 'start') {
-        const r = await pty.start({ shell: b.shell, cwd: b.cwd || curDir,
+        const r = await P.start({ shell: b.shell, cwd: b.cwd || s.cwd,
           cols: b.cols || 100, rows: b.rows || 30 });
-        return sendJson(res, { ok: r.ok, msg: r.msg || '', error: pty.lastError || '' });
+        return sendJson(res, { ok: r.ok, msg: r.msg || '', error: P.lastError || '', session: s.id });
       }
-      if (b.op === 'write') { pty.write(b.text || ''); return sendJson(res, { ok: true }); }
-      if (b.op === 'resize') { pty.resize(b.cols || 100, b.rows || 30); return sendJson(res, { ok: true }); }
-      if (b.op === 'stop') { pty.stop(); return sendJson(res, { ok: true }); }
+      if (b.op === 'write') { P.write(b.text || ''); return sendJson(res, { ok: true }); }
+      if (b.op === 'resize') { P.resize(b.cols || 100, b.rows || 30); return sendJson(res, { ok: true }); }
+      if (b.op === 'stop') { P.stop(); return sendJson(res, { ok: true }); }
       return sendJson(res, { ok: false, msg: 'unknown op' });
     }
 
-    // 终端输出流：NDJSON 长连接（out / exit / error）
+    // 终端输出流：NDJSON 长连接（out / exit / error）。?s=<会话 id>
     if (p === '/api/pty/stream') {
+      const s = getSess(u.searchParams.get('s'), false);
       res.writeHead(200, {
         'Content-Type': 'application/x-ndjson; charset=utf-8',
         'Cache-Control': 'no-cache',
         'Transfer-Encoding': 'chunked',
         'X-Accel-Buffering': 'no',
       });
-      // 订阅前已经吐出来的内容要补上（前端可能晚几百毫秒才连上来）
-      const subGen = pty.gen;                        // 只收当前这代会话的事件
-      if (pty.backlogText()) {
-        res.write(JSON.stringify({ t: 'out', text: pty.backlogText(), backlog: true }) + '\n');
+      if (!s) {
+        res.write(JSON.stringify({ t: 'error', msg: '会话不存在（可能已被关闭）' }) + '\n');
+        return res.end();
       }
-      res.write(JSON.stringify({ t: 'status', running: pty.running }) + '\n');
-      const off = pty.on((ev) => {
+      const P = s.pty;
+      // 订阅前已经吐出来的内容要补上（前端可能晚几百毫秒才连上来）
+      const subGen = P.gen;                          // 只收当前这代会话的事件
+      if (P.backlogText()) {
+        res.write(JSON.stringify({ t: 'out', text: P.backlogText(), backlog: true, session: s.id }) + '\n');
+      }
+      res.write(JSON.stringify({ t: 'status', running: P.running, session: s.id }) + '\n');
+      const off = P.on((ev) => {
         if (ev.gen !== undefined && ev.gen !== subGen) return;   // 旧会话残响（如被顶掉时的 exit），不投递
-        const out = { t: ev.t, code: ev.code, reason: ev.reason, msg: ev.msg, text: ev.text };
+        const out = { t: ev.t, code: ev.code, reason: ev.reason, msg: ev.msg, text: ev.text, session: s.id };
         try { res.write(JSON.stringify(out) + '\n'); } catch (e) { /* 连接已断 */ }
         if (ev.t === 'exit') { try { res.end(); } catch (e) {} }
       });
@@ -904,7 +993,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (p === '/api/pty/status') {
-      return sendJson(res, { running: pty.running, shell: pty.shell, error: pty.lastError || '' });
+      const s = getSess(u.searchParams.get('s'), false);
+      if (!s) return sendJson(res, { running: false, shell: '', error: '' });
+      return sendJson(res, { running: s.pty.running, shell: s.pty.shell, error: s.pty.lastError || '', session: s.id });
     }
 
     // 静态文件
