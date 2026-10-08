@@ -1,3 +1,6 @@
+// 把角色像素画稿导成 ASCII，直接在终端里 eyeball 各心情态画得对不对。
+// 用法： node mockup/check_art.js mockup/index.html
+// 读的是 index.html 里 /*PIXEL-BEGIN*/ … /*PIXEL-END*/ 之间的那段像素数据。
 const fs = require('fs');
 const html = fs.readFileSync(process.argv[2], 'utf8');
 const code = html.split('/*PIXEL-BEGIN*/')[1].split('/*PIXEL-END*/')[0];

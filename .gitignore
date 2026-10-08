@@ -10,10 +10,11 @@ server/llm-config.json
 # 网络地理缓存（含本机真实 IP / 地理位置）
 server/netgeo-cache.json
 
-# 临时诊断脚本
+# 临时诊断脚本（下划线前缀 = 不入库，别拿它当正式工具）
 tools/_*
 tools/*.log
 tools/*.png
+mockup/_*
 
 # 开发过程截图（只用于远程验证结果，运行时不读）
 app/shots/
