@@ -134,14 +134,14 @@ def write_ico(path, images):
 
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
-    out = os.path.join(here, "assets", "PonkoHUD.ico")
+    out = os.path.join(here, "assets", "Ponko-HUD.ico")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     images = []
     for s in SIZES:
         blob = png_bytes(s, s, render(s))
         images.append((s, blob))
         # keep PNG copies for html shortcut usage
-        with open(os.path.join(os.path.dirname(out), f"PonkoHUD_{s}.png"), "wb") as f:
+        with open(os.path.join(os.path.dirname(out), f"Ponko-HUD_{s}.png"), "wb") as f:
             f.write(blob)
     write_ico(out, images)
     print("wrote", out, os.path.getsize(out), "bytes",

@@ -12,7 +12,7 @@ if errorlevel 1 start "Ponko HUD backend" /MIN node "%ROOT%server\server.js"
 timeout /t 1 /nobreak >nul
 
 start "" "%EDGE%" --app=http://127.0.0.1:8787/ ^
-  --user-data-dir="%LOCALAPPDATA%\PonkoHUD\edge-profile" ^
+  --user-data-dir="%LOCALAPPDATA%\Ponko-HUD\edge-profile" ^
   --no-first-run --no-default-browser-check --disable-extensions ^
   --disable-features=msWebOOUI,msPdfOOUI,Translate ^
   --window-size=1680,940

@@ -970,7 +970,7 @@ async function boot() {
     if (asCmd) {
       // 演示 CMD 模式：切换 → cd 中文目录 → 列目录 → 触发一次错误退出码
       setTimeout(() => panels.shell.exec('cmd'), 500);
-      setTimeout(() => panels.shell.exec('cd "C:\\Users\\Administrator\\WorkBuddy\\智能Agent\\PonkoHUD"'), 1100);
+      setTimeout(() => panels.shell.exec('cd "C:\\Users\\Administrator\\WorkBuddy\\智能Agent\\Ponko-HUD"'), 1100);
       setTimeout(() => panels.shell.exec('dir /b'), 1700);
       setTimeout(() => panels.shell.exec('echo 中文正常 显示测试'), 2300);
     } else {

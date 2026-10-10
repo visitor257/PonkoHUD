@@ -57,7 +57,7 @@ def find_best_hwnd(title=TITLE):
 
 
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\Administrator\WorkBuddy\智能Agent\PonkoHUD\tools\snap_native.png"
+    out = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\Administrator\WorkBuddy\智能Agent\Ponko-HUD\tools\snap_native.png"
     u = ctypes.windll.user32
     g = ctypes.windll.gdi32
     hwnd = find_best_hwnd()

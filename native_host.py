@@ -37,10 +37,10 @@ import time
 import urllib.request
 from ctypes import wintypes
 
-APP_ID = "PonkoHUD.Desktop"
+APP_ID = "Ponko-HUD.Desktop"
 APP_TITLE = "Ponko HUD"
 ROOT = os.path.dirname(os.path.abspath(__file__))
-ICON = os.path.join(ROOT, "tools", "assets", "PonkoHUD.ico")
+ICON = os.path.join(ROOT, "tools", "assets", "Ponko-HUD.ico")
 RUN_DIR = os.path.join(ROOT, "run")
 
 # HUD palette as COLORREF (0x00bbggrr)

@@ -45,7 +45,7 @@ function saveCache() {
 function getJson(url, timeout = 6000) {
   return new Promise((res, rej) => {
     const mod = url.startsWith('https') ? https : http;
-    const req = mod.get(url, { timeout, headers: { 'User-Agent': 'PonkoHUD/0.1' } }, (r) => {
+    const req = mod.get(url, { timeout, headers: { 'User-Agent': 'Ponko-HUD/0.1' } }, (r) => {
       if (r.statusCode >= 300 && r.statusCode < 400 && r.headers.location) {
         r.resume();
         return getJson(r.headers.location, timeout).then(res, rej);
@@ -63,7 +63,7 @@ function getJson(url, timeout = 6000) {
 function getText(url, timeout = 5000) {
   return new Promise((res, rej) => {
     const mod = url.startsWith('https') ? https : http;
-    const req = mod.get(url, { timeout, headers: { 'User-Agent': 'PonkoHUD/0.1' } }, (r) => {
+    const req = mod.get(url, { timeout, headers: { 'User-Agent': 'Ponko-HUD/0.1' } }, (r) => {
       if (r.statusCode >= 300 && r.statusCode < 400 && r.headers.location) {
         r.resume();
         return getText(r.headers.location, timeout).then(res, rej);

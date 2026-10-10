@@ -1,4 +1,4 @@
-# PonkoHUD 运行时依赖
+# Ponko-HUD 运行时依赖
 #   pywebview  — native_host.py 的原生窗口外壳（WebView2）
 #   pywinpty   — server/ptybridge.py 的交互式终端（Windows ConPTY）
 pywebview>=4.0
