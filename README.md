@@ -36,3 +36,10 @@ native_host.py  pywebview 原生窗口宿主
 
 界面语言与代码注释为中文。项目硬编码了本机路径，克隆后请按需修改 `native_host.py`
 与 `app/src/main.js` 中的目录。
+
+## License
+
+[MIT](LICENSE) © 2026 visitor257
+
+第三方资源：`characters/ds-whale/` 下的角色美术素材是独立素材，不在上述授权范围内，
+请勿单独提取使用。
