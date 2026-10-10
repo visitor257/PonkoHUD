@@ -4,6 +4,11 @@ import { ShellPanel } from '../app/src/panels/shell.js';
 import { Selection } from '../app/src/selection.js';
 import { exitWidth, exitLabel, exitButtonRect } from '../app/src/exitbutton.js';
 import { zoomBtnRect, zoomWidth, fullRect } from '../app/src/zoombtn.js';
+import {
+  ZOOM_DUR, ZOOM_W, ZOOM_INK, ZOOM_INK_IN, ZOOM_OTHER_W,
+  zoomPhase, zoomEase, zoomAnimRect, zoomBorderMix,
+  zoomSelfFade, zoomOtherFade, zoomStagger, zoomOtherOrder, zoomSmooth,
+} from '../app/src/zoomanim.js';
 
 let fail = 0;
 const chk = (name, ok, got) => {
@@ -601,6 +606,151 @@ console.log('\n── 11. 各框右下角的 ⛶ / 〼 放大按钮 ──');
   chk('放大后上下各留 2 行 chrome', full.y === 2 && full.h === g.rows - 4, JSON.stringify(full));
   const big = zoomBtnRect(g, full, true);
   chk('放大后按钮仍在右下角', big.y === full.y + full.h - 1 && big.x1 === g.cols - 2, JSON.stringify(big));
+}
+
+console.log('\n── 12. 放大 / 还原的过场动画（不再一帧到位）──');
+{
+  const from = { x: 34, y: 2, w: 60, h: 18 };      // SHELL 在分栏里的位置
+  const to = { x: 0, y: 2, w: 120, h: 36 };        // 放大后的整块内容区
+  const sameRect = (a, b) => a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+
+  // easing：起点终点必须精确、全程单调、且是 easeOut（前半程走得比线性快）
+  chk('easing 端点精确（0→0、1→1）', zoomEase(0) === 0 && Math.abs(zoomEase(1) - 1) < 1e-9,
+    `${zoomEase(0)} / ${zoomEase(1)}`);
+  chk('easeOut：中点进度 > 线性的一半（冲出去再收住）', zoomEase(0.5) > 0.5, zoomEase(0.5));
+  let mono = true, prevE = -1;
+  for (let i = 0; i <= 20; i++) { const e = zoomEase(i / 20); if (e < prevE - 1e-12) mono = false; prevE = e; }
+  chk('easing 全程单调不回头', mono, '');
+
+  // 矩形插值：两条边一起走，所以 x 只减、宽只增，中间不能抖
+  chk('进度 0 就是原框', sameRect(zoomAnimRect(from, to, 0), from), JSON.stringify(zoomAnimRect(from, to, 0)));
+  chk('进度 1 就是全屏框', sameRect(zoomAnimRect(from, to, 1), to), JSON.stringify(zoomAnimRect(from, to, 1)));
+
+  const path = [];
+  for (let i = 0; i <= 20; i++) path.push(zoomAnimRect(from, to, zoomEase(i / 20)));
+  chk('左边界单调向右扩展（不来回抖）',
+    path.every((r, i) => i === 0 || r.x <= path[i - 1].x), JSON.stringify(path.map((r) => r.x)));
+  chk('宽度单调增长（不缩回去）',
+    path.every((r, i) => i === 0 || r.w >= path[i - 1].w), JSON.stringify(path.map((r) => r.w)));
+  chk('中间态始终夹在起点与终点之间（没越界）',
+    path.every((r) => r.x >= to.x && r.x <= from.x && r.w >= from.w && r.w <= to.w
+      && r.y >= to.y && r.h >= from.h && r.h <= to.h), '');
+  // 这条是关键：真在走就必须出现既不等于起点也不等于终点的框，且数量要够（帧数太少就是假动画）
+  const mids = new Set(path.map((r) => `${r.x},${r.y},${r.w},${r.h}`));
+  chk('确实走到了中间态（不是一步跳到终点）', mids.size >= 8, `${mids.size} 个不同形状`);
+  chk('最小的中间框也够画一圈边框（w,h ≥ 2）', path.every((r) => r.w >= 2 && r.h >= 2), '');
+  // 格子必须取整：半个格子会让 box-drawing 的竖线错位
+  chk('宽高都是整格（box-drawing 不会画歪）',
+    path.every((r) => Number.isInteger(r.x) && Number.isInteger(r.y)
+      && Number.isInteger(r.w) && Number.isInteger(r.h)), '');
+
+  // 反向（还原）：起止互换即可
+  chk('还原方向：起点是全屏、终点回到原来的分栏',
+    sameRect(zoomAnimRect(to, from, 0), to) && sameRect(zoomAnimRect(to, from, 1), from), '');
+
+  // 描边色：两头都留渐变 —— 进位移段时框还是正常线色（上一段刚淡完内容），
+  // 出位移段要接回面板自己的线色，任何一头硬切都会看见"啪"地换色
+  chk('进位移段：由正常线色升到 accent', zoomBorderMix(0) === 1 && zoomBorderMix(ZOOM_INK_IN) === 0,
+    `${zoomBorderMix(0)} / ${zoomBorderMix(ZOOM_INK_IN)}`);
+  chk('位移中段保持 accent', zoomBorderMix((ZOOM_INK_IN + ZOOM_INK) / 2) === 0, '');
+  chk('出位移段收回正常线色', Math.abs(zoomBorderMix(1) - 1) < 1e-9, zoomBorderMix(1));
+
+  // ── 三段依次：淡出 → 位移 → 淡入（不是一锅端）
+  const segs = [];
+  for (let i = 0; i <= 100; i++) segs.push(zoomPhase(1, i / 100).seg);
+  const order = ['out', 'move', 'in'];
+  let seqOk = true, seen = -1;
+  for (const s of segs) {
+    const k = order.indexOf(s);
+    if (k < seen) seqOk = false;          // 回头了 = 段之间有重叠/乱序
+    seen = Math.max(seen, k);
+  }
+  chk('三段严格依次（out→move→in，不回头）', seqOk, '');
+  chk('三段都真的排上了（不是某段长度为 0）',
+    new Set(segs).size === 3, [...new Set(segs)].join(','));
+  chk('进度 0 落在淡出段起点、进度 1 落在淡入段终点',
+    zoomPhase(1, 0).seg === 'out' && zoomPhase(1, 0).p === 0
+    && zoomPhase(1, 1).seg === 'in' && Math.abs(zoomPhase(1, 1).p - 1) < 1e-9, '');
+  chk('两个方向的切段一致（还原只是内容换了顺序，节奏相同）',
+    zoomPhase(-1, 0.5).seg === zoomPhase(1, 0.5).seg, '');
+
+  // ── 主角框的内容：先退干净 → 位移时空着 → 到位再浮现
+  chk('淡出段内容 1→0', zoomSelfFade('out', 0) === 1 && zoomSelfFade('out', 1) === 0, '');
+  chk('位移段一律没有内容（带着妆走）', zoomSelfFade('move', 0) === 0 && zoomSelfFade('move', 1) === 0, '');
+  chk('淡入段内容 0→1', zoomSelfFade('in', 0) === 0 && zoomSelfFade('in', 1) === 1, '');
+  let smono = true, ps = 2;
+  for (let i = 0; i <= 20; i++) { const f = zoomSelfFade('out', i / 20); if (f > ps + 1e-12) smono = false; ps = f; }
+  chk('内容淡出单调（不会闪回来）', smono, '');
+  chk('淡入用的是 smoothstep（两头都不硬）', zoomSmooth(0.5) === 0.5 && zoomSmooth(0) === 0 && zoomSmooth(1) === 1, '');
+
+  // ── 其它框：错开（这条是"不要同时"的正面证据）
+  const N = 4;
+  // 某个框"开始动"的时刻（放大=开始变淡，还原=开始变亮）
+  const startAt = (dir, seg, idx) => {
+    for (let i = 0; i <= 400; i++) {
+      const p = i / 400;
+      const f = zoomOtherFade(dir, seg, p, idx, N);
+      if (dir > 0 ? f < 0.999 : f > 0.001) return p;
+    }
+    return 1;
+  };
+  const sOut = [0, 1, 2, 3].map((i) => startAt(1, 'out', i));
+  chk('放大：其它框依次开始淡出（不是一起淡）',
+    sOut.every((v, i) => i === 0 || v > sOut[i - 1] + 1e-9), sOut.map((v) => v.toFixed(3)).join(' < '));
+  const sIn = [0, 1, 2, 3].map((i) => startAt(-1, 'in', i));
+  chk('还原：其它框依次开始淡入（不是一起现）',
+    sIn.every((v, i) => i === 0 || v < sIn[i - 1] - 1e-9), sIn.map((v) => v.toFixed(3)).join(' > '));
+  chk('还原是放大的倒放（最远的先回来，紧贴主角的最后回）',
+    sIn[0] > sIn[N - 1], `${sIn[0].toFixed(3)} vs ${sIn[N - 1].toFixed(3)}`);
+  // 错开间隔得看得出来：小于 2 帧跟"同时"没区别
+  const gapSec = (sOut[1] - sOut[0]) * ZOOM_W.out * ZOOM_DUR;
+  chk('相邻两框的错开间隔 ≥ 2 帧（肉眼能分出先后）', gapSec >= 0.033, `${(gapSec * 1000).toFixed(0)}ms`);
+  // 同一时刻拿四个框的可见度，必须各不相同（都相等就说明没错开）
+  const snap = [0, 1, 2, 3].map((i) => zoomOtherFade(1, 'out', 0.45, i, N));
+  chk('同一帧里四个框的可见度互不相同', new Set(snap.map((v) => v.toFixed(4))).size === N,
+    snap.map((v) => v.toFixed(2)).join(' / '));
+  // 段末要收干净 / 段初都还在，不能有谁被窗口截断
+  chk('放大：淡出段末其它框全部退干净',
+    [0, 1, 2, 3].every((i) => zoomOtherFade(1, 'out', 1, i, N) === 0), '');
+  chk('还原：淡入段末其它框全部回来',
+    [0, 1, 2, 3].every((i) => zoomOtherFade(-1, 'in', 1, i, N) === 1), '');
+  chk('错开窗口不截断任何一个框（最后一个正好撑到段末）',
+    Math.abs(zoomStagger(1, N - 1, N) - 1) < 1e-9 && zoomStagger(0, 0, N) === 0, '');
+  // 不在自己那一段时必须彻底缺席
+  chk('放大：位移段与淡入段其它框不在场',
+    [0, 1, 2, 3].every((i) => zoomOtherFade(1, 'move', 0.5, i, N) === 0
+      && zoomOtherFade(1, 'in', 0.5, i, N) === 0), '');
+  chk('还原：淡出段与位移段其它框还没回来',
+    [0, 1, 2, 3].every((i) => zoomOtherFade(-1, 'out', 0.5, i, N) === 0
+      && zoomOtherFade(-1, 'move', 0.5, i, N) === 0), '');
+  let fmono = true, pf = 2;
+  for (let i = 0; i <= 40; i++) {
+    const f = zoomOtherFade(1, 'out', i / 40, 0, N); if (f > pf + 1e-12) fmono = false; pf = f;
+  }
+  chk('单个框自身的淡出单调递减（不会闪回来）', fmono, '');
+
+  // ── 出场顺序按几何距离：由近及远，这样退场连成一片扩散出去的波
+  const rects = {
+    shell: { x: 0, y: 20, w: 60, h: 16 },    // 主角
+    globe: { x: 0, y: 2, w: 60, h: 16 },     // 正上方，最近
+    sys: { x: 0, y: 38, w: 120, h: 8 },
+    agent: { x: 62, y: 20, w: 58, h: 16 },   // 右邻
+    char: { x: 62, y: 2, w: 58, h: 16 },     // 右上对角，最远
+  };
+  const seq = zoomOtherOrder('shell', ['globe', 'shell', 'agent', 'char', 'sys'], rects);
+  chk('出场顺序由近及远', seq[0] === 'globe' && seq[seq.length - 1] === 'char', seq.join(' → '));
+  chk('顺序里不含主角自己', !seq.includes('shell'), seq.join(','));
+  chk('顺序覆盖其余所有框', seq.length === 4, seq.length);
+
+  // 时长：三段加起来是"看得清但不碍事"的量级
+  chk('过场总时长在 0.5~1.0s（分了三段，短了看不出层次）',
+    ZOOM_DUR >= 0.5 && ZOOM_DUR <= 1.0, ZOOM_DUR);
+  chk('三段权重加起来为 1',
+    Math.abs(ZOOM_W.out + ZOOM_W.move + ZOOM_W.in - 1) < 1e-9, ZOOM_W.out + ZOOM_W.move + ZOOM_W.in);
+  chk('位移段最长（它是主角）',
+    ZOOM_W.move > ZOOM_W.out && ZOOM_W.move > ZOOM_W.in, JSON.stringify(ZOOM_W));
+  chk('单个框自身淡完的时长 ≤ 所在段（否则会被段末截断）',
+    ZOOM_OTHER_W <= 1 && ZOOM_OTHER_W > 0.2, ZOOM_OTHER_W);
 }
 
 console.log(`\n${fail === 0 ? '全部通过' : fail + ' 项失败'}`);

@@ -1,5 +1,5 @@
 // 主装配：布局 / 主循环 / 输入 / 鼠标
-import { Grid, ATTR, rgb } from './grid.js';
+import { Grid, ATTR, rgb, mix } from './grid.js';
 import { themeFor, MOOD_KEYS } from './theme.js';
 import { Mood } from './mood.js';
 import { loadPacks } from './charpack.js';
@@ -12,6 +12,10 @@ import { GlobePanel } from './panels/globe.js';
 import { Selection } from './selection.js';
 import { exitButtonRect } from './exitbutton.js';
 import { ZOOM_KEYS, PANEL_NAME, zoomBtnRect, fullRect } from './zoombtn.js';
+import {
+  ZOOM_DUR, zoomPhase, zoomEase, zoomAnimRect, zoomBorderMix,
+  zoomSelfFade, zoomOtherFade, zoomOtherOrder,
+} from './zoomanim.js';
 
 const canvas = document.getElementById('screen');
 const grid = new Grid(canvas, { fontSize: 15, lineHeight: 1.2 });
@@ -39,6 +43,9 @@ const SYS_H = 8;                  // 右下 SYS 小格高度
 const CHROME_TOP = 2, CHROME_BOT = 2;   // 顶栏 / 底部提示各占的行数（放大态也保留）
 let zoom = null;                  // 被放大到全屏的面板 key（null = 正常分栏）
 let zoomHits = [];                // 每帧登记的「放大/还原」按钮命中区
+let zoomAnim = null;              // 放大/还原的过场：{ key, dir, t, from, to }（非 null 时由它接管画面）
+let zoomDur = ZOOM_DUR;           // 过场时长（秒），?zoomanim=N 可覆盖（调试用）
+let baseRects = {};               // 还没顾上 zoom 时的原始分栏（动画起止要用它的矩形）
 
 function layout() {
   const cols = grid.cols, rows = grid.rows;
@@ -63,6 +70,10 @@ function layout() {
     s2: { x: rx - SPLIT_W, y: y0, w: SPLIT_W, h: mainH },
     hsplit: { x: lx, y: y0 + halfH, w: cx + midW - lx, h: 1 },
   };
+  // 存档一份「没被放大」的原始分栏：还原动画的终点就是这里面的那个矩形。
+  // 必须在下面被 zoom 覆盖之前存 —— 否则放大态下读到的已经是全屏矩形，点还原就原地不动了。
+  baseRects = {};
+  for (const k in rects) baseRects[k] = { ...rects[k] };
   for (const k in panels) {
     const p = panels[k];
     if (!p) continue;
@@ -82,23 +93,55 @@ function layout() {
 }
 
 // ── 单框放大：点框右下角的按钮把它拉满整个内容区，再点还原 ──
+//
+// 点下去不是"一帧到位"，而是走一整套过场（顺序见 zoomanim.js 顶部）：
+//   放大 〔其它框由近及远依次淡出 + 内容淡出〕→〔位移〕→〔内容淡入〕
+//   还原 〔内容淡出〕→〔位移〕→〔其它框由远及近依次淡入 + 内容淡入〕
+// 逻辑态（焦点、底部提示）当场就切，不用等动画。
+// 过场途中再点不接第二单 —— 那段里框的位置每帧都在变，命中区也跟着漂，
+// 这时候去点一定会点歪（宁可吞掉这下点击）。
 function toggleZoom(key) {
-  if (!panels[key]) return;
+  if (!panels[key] || zoomAnim) return;
+  const full = fullRect(grid, CHROME_TOP, CHROME_BOT);
+  const base = baseRects[key] || full;
+  selection.clear();          // 选区是画在正文上的，别让它跟过场同时在屏幕上
+  // 其它框的出场次序按「离它多近」排：都用分栏态的矩形算，放大/还原两趟才对称
+  const others = zoomOtherOrder(key, ZOOM_KEYS, baseRects);
   if (zoom === key) {
-    zoom = null;
+    const from = { ...(rects[key] || full) };
+    zoomAnim = { key, dir: -1, t: 0, from, to: { ...base }, others };
     selToast = { text: `已还原 ${PANEL_NAME[key] || key}`, until: performance.now() + 1600 };
   } else {
+    const from = { ...(baseRects[key] ? baseRects[key] : full) };
+    zoomAnim = { key, dir: 1, t: 0, from, to: { ...full }, others };
     zoom = key;
     selToast = { text: `已放大 ${PANEL_NAME[key] || key} · 点右下角 〼 恢复`, until: performance.now() + 2600 };
     if (key === 'shell' || key === 'agent') focus = key;
   }
+}
+
+/** 过场走完：把 rect 落到终态，交还给面板自己画 */
+function finishZoom() {
+  const a = zoomAnim;
+  zoomAnim = null;
+  zoom = a.dir > 0 ? a.key : null;
   layout(); syncHidden();
+  const p = panels[a.key];
+  // 内容在最后的「淡入」段已经浮完了（见 drawZoomTransition），这里别再打回 0 重来一次
+  if (p) p.contentFade = 1;
+}
+
+/** 立刻结束进行中的过场（ resize 之类必须马上用新布局的场合） */
+function snapZoom() {
+  if (zoomAnim) finishZoom();
 }
 
 /** 画各框右下角的 □ / 〼 按钮（在面板之后画，盖在底边线上）
  *  符号只有 1~2 格，所以平常态用比底边线亮一档的 lineHi 当底色，免得糊在 '─' 里看不见。 */
 function drawZoomButtons(T) {
   zoomHits = [];
+  // 过场中那个框还在移动，按钮会跟着一路漂（位置每帧都变，点了也点不准）→ 先撤掉
+  if (zoomAnim) return;
   for (const k of ZOOM_KEYS) {
     const p = panels[k];
     if (!p || !p.rect) continue;
@@ -524,6 +567,8 @@ function clickPanel(hit, c) {
   syncHidden();
 }
 canvas.addEventListener('mousedown', (e) => {
+  // 过场中：框还在位移，命中区每帧都在漂 —— 这时候点哪儿都可能点歪，干脆不接
+  if (zoomAnim) return;
   const c = cellAt(e);
   // 顶部右上角「退出」按钮（chrome 栏，不属于任何面板）
   if (exitBtn.y === 0 && c.y === 0 && c.x >= exitBtn.x0 && c.x <= exitBtn.x1) {
@@ -598,6 +643,7 @@ window.addEventListener('mouseup', () => {
   dragSplit = null; panels.globe.onUp();
 });
 canvas.addEventListener('wheel', (e) => {
+  if (zoomAnim) return;                     // 过场中先别滚（框还在移动，滚给谁说不清）
   const c = cellAt(e);
   // 放大态：滚轮只给被放大那个框（放大 GLOBE 时在地球上面滚就不该滚到 SHELL 的历史）
   const p = zoom
@@ -684,7 +730,13 @@ function drawOpeningBox(g, r, o, orient, T) {
     }
   }
 }
-function drawPanel(p, g, C) {
+/**
+ * @param fade     额外压上去的整体可见度（过场里用它把退场的框淡掉）
+ * @param fadeBg   fade 往哪个底色收（默认是 panel：内容淡进面板底色；
+ *                 过场时传 T.bg —— 整块连底色带边框一起淡掉，溶进屏幕背景）
+ * @param fadeAll  true = 连底色和边框一起淡（退场的框用它，否则只剩一地空色块）
+ */
+function drawPanel(p, g, C, fade, fadeBg, fadeAll) {
   if (!p) return;
   const o = (p.open === undefined) ? 1 : p.open;
   if (o < 1) {                           // 展开中：只画框（边框清晰），不画内容；easeOut 让框“冲出后收住”
@@ -692,11 +744,90 @@ function drawPanel(p, g, C) {
     return;
   }
   // 展开完成：边框已经清晰，内容再“淡入”（颜色从融进背景渐变到正常）
-  g.fadeBg = C.theme.panel;
-  g.fade = (p.contentFade === undefined || p.contentFade >= 1) ? 1 : p.contentFade;
+  const own = (p.contentFade === undefined || p.contentFade >= 1) ? 1 : p.contentFade;
+  g.fadeBg = fadeBg !== undefined ? fadeBg : C.theme.panel;
+  g.fadeAll = !!fadeAll;
+  g.fade = fade === undefined ? own : own * fade;
   p.draw(g, C);
   if (p === panels.char && p.ensureFrame) p.ensureFrame(Math.min(rects.char.w - 2, 40), t);
-  g.fade = 1;                            // 复位，避免影响分割条 / 标题栏
+  g.fadeAll = false;                     // 复位，避免影响分割条 / 标题栏
+  g.fade = 1;
+}
+
+// ── 单框放大 / 还原的过场画面 ────────────────────────────────────────────
+// 一次过场分三段依次走（顺序见 zoomanim.js 顶部）：
+//   out   其它框错开淡出（放大时）+ 主角内容淡出
+//   move  主角框位移，只带框不带内容
+//   in    主角内容淡入（还原时还要把其它框错开淡回来）
+function drawSplit(T) {
+  for (const k of ['s1', 's2']) {
+    const r = rects[k];
+    if (!r) continue;
+    for (let y = r.y; y < r.y + r.h; y++) grid.set(r.x, y, '│', T.line, T.bg);
+  }
+  const hr = rects.hsplit;
+  if (hr) grid.text(hr.x, hr.y, '╌'.repeat(hr.w), T.line, T.bg);
+}
+
+/** 位移中的那个框：实心面板底 + 描边（描边色最后一段从 accent 收回正常线色） */
+function drawZoomBox(g, r, T, e) {
+  if (!r || r.w < 2 || r.h < 2) return;
+  const fg = mix(T.accent, T.line, zoomBorderMix(e));
+  g.fill(r.x, r.y, r.w, r.h, ' ', fg, T.panel);
+  const X2 = r.x + r.w - 1, Y2 = r.y + r.h - 1;
+  g.set(r.x, r.y, '┌', fg, T.panel, 0, true);
+  g.set(X2, r.y, '┐', fg, T.panel, 0, true);
+  g.set(r.x, Y2, '└', fg, T.panel, 0, true);
+  g.set(X2, Y2, '┘', fg, T.panel, 0, true);
+  if (r.w > 2) {
+    g.text(r.x + 1, r.y, '─'.repeat(r.w - 2), fg, T.panel);
+    g.text(r.x + 1, Y2, '─'.repeat(r.w - 2), fg, T.panel);
+  }
+  for (let y = r.y + 1; y < Y2; y++) {
+    g.set(r.x, y, '│', fg, T.panel, 0, true);
+    g.set(X2, y, '│', fg, T.panel, 0, true);
+  }
+}
+
+function drawZoomTransition(T, C) {
+  const a = zoomAnim;
+  const { seg, p } = zoomPhase(a.dir, a.t);
+  const n = a.others.length;
+
+  // ① 其它框：放大时在 out 段依次退场，还原时在 in 段依次回来。
+  //    每个框有**自己的**进度（错开的），所以必须逐个设 fade 逐个画 ——
+  //    共用一个 fade 值就成了"一起淡"，正是这套节奏要避免的。
+  const othersOn = (a.dir > 0 && seg === 'out') || (a.dir < 0 && seg === 'in');
+  if (othersOn && n > 0) {
+    grid.fadeAll = true;                  // 连底色带边框一起溶进背景，不留空色块
+    for (let i = 0; i < n; i++) {
+      const f = zoomOtherFade(a.dir, seg, p, i, n);
+      if (f <= 0.02) continue;            // 已经没了 / 还没轮到
+      drawPanel(panels[a.others[i]], grid, C, f, T.bg, true);
+    }
+    // 分割条跟着最后一个框走：它是"分栏"这个结构本身，框都让位了才轮到它
+    const fs = zoomOtherFade(a.dir, seg, p, n - 1, n);
+    if (fs > 0.02) {
+      grid.fadeBg = T.bg; grid.fade = fs; drawSplit(T); grid.fade = 1;
+    }
+    grid.fadeAll = false;
+  }
+
+  // ② 主角框
+  if (seg === 'move') {                   // 位移段：只带框，不带内容
+    drawZoomBox(grid, zoomAnimRect(a.from, a.to, zoomEase(p)), T, p);
+    return;
+  }
+  const pnl = panels[a.key];
+  if (!pnl) return;
+  // out 段待在原位、in 段已经在终位 —— 两段里框都是静止的，内容按它排不会抖
+  const r = seg === 'out' ? a.from : a.to;
+  pnl.layout(r);
+  grid.fadeBg = C.theme.panel;
+  grid.fade = zoomSelfFade(seg, p);       // 只压内容：边框走 nofade，框本身始终清晰
+  pnl.draw(grid, C);
+  if (pnl === panels.char && pnl.ensureFrame) pnl.ensureFrame(Math.min(r.w - 2, 40), t);
+  grid.fade = 1;
 }
 
 function drawChrome(T) {
@@ -754,11 +885,17 @@ function frame(now) {
       const local = Math.max(0, elapsed - (p.delay || 0));
       p.open = Math.min(1, local / openDur);
     } else if (p.contentFade !== undefined && p.contentFade < 1) {
-      p.contentFade = Math.min(1, p.contentFade + dt / contentDur);
+      p.contentFade = Math.min(1, p.contentFade + dt / (p.fadeDur || contentDur));
     }
   }
   // 放大态：只画被放大那一个框，其余连同分割条都不画（它们的 rect 还在，但屏幕上没有）
-  if (zoom) {
+  if (zoomAnim) {
+    zoomAnim.t = Math.min(1, zoomAnim.t + dt / zoomDur);
+    if (zoomAnim.t >= 1) finishZoom();     // 到位 → 交还常规绘制路径，内容开始淡入
+  }
+  if (zoomAnim) {
+    drawZoomTransition(T, C);            // 过场期间整幅画面由它接管
+  } else if (zoom) {
     drawPanel(panels[zoom], grid, C);
   } else {
     drawPanel(panels.sys, grid, C);
@@ -769,19 +906,11 @@ function frame(now) {
   }
 
   // 分割条
-  if (!zoom) {
-    for (const k of ['s1', 's2']) {
-      const r = rects[k];
-      if (!r) continue;
-      for (let y = r.y; y < r.y + r.h; y++) grid.set(r.x, y, '│', T.line, T.bg);
-    }
-    const hr = rects.hsplit;
-    if (hr) grid.text(hr.x, hr.y, '╌'.repeat(hr.w), T.line, T.bg);
-  }
+  if (!zoom && !zoomAnim) drawSplit(T);
 
   drawChrome(T);
   // SHELL 标签栏画在框顶线**之上**（框外），必须晚于 chrome 的分隔线 —— 否则那行 '─' 会盖掉它
-  if ((!zoom || zoom === 'shell') && panels.shell.open >= 1) {
+  if (!zoomAnim && (!zoom || zoom === 'shell') && panels.shell.open >= 1) {
     grid.fadeBg = T.panel;
     grid.fade = (panels.shell.contentFade === undefined || panels.shell.contentFade >= 1) ? 1 : panels.shell.contentFade;
     panels.shell.drawTabBar(grid, C);
@@ -801,6 +930,8 @@ async function boot() {
   bootAt = performance.now();            // 进场动画计时起点
   const bd = parseFloat(q.get('bootdur'));   // 调试：?bootdur=N 拉长/缩短进场动画（默认 0.55s）
   if (!Number.isNaN(bd) && bd > 0) { openDur = bd; contentDur = bd; }
+  const zd = parseFloat(q.get('zoomanim'));  // 调试：?zoomanim=N 拉长放大/还原过场（默认 0.3s）
+  if (!Number.isNaN(zd) && zd >= 0) zoomDur = zd;
   // ?mood=think          手动覆盖（调试）
   // ?local=1             shell 成败允许反向影响心情（默认关闭：那是 agent 的活）
   // ?nofallback=1        连"长时间无 agent 活动→瞌睡"的兜底也关掉，完全听 agent
@@ -821,7 +952,8 @@ async function boot() {
   // 调试：?sphase=T 把自动跑马灯的累计时钟直接设到 T 秒（验证缓动起停用），例如 ?sphase=1 看刚起步、?sphase=7.5 看将到末端
   const sp = parseFloat(q.get('sphase'));
   if (!Number.isNaN(sp)) { panels.globe._autoClock = sp; panels.globe._frozen = true; }
-  window.addEventListener('resize', () => { grid.resize(); layout(); syncHidden(); });
+  // 过场走到一半改窗口大小的话，起止矩形都作废了 —— 直接跳到终态再按新尺寸排
+  window.addEventListener('resize', () => { snapZoom(); grid.resize(); layout(); syncHidden(); });
   layout(); syncHidden(); hidden.focus();
   pollSys();
   pollNet();

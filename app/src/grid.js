@@ -66,6 +66,7 @@ export class Grid {
     this._fontCache = new Map();
     this.fade = 1;                 // 内容淡入：1=正常，0=完全融进背景（看不见）
     this.fadeBg = 0;               // fade<1 时前景色混入的目标底色（main 在画面板前设为该面板底色）
+    this.fadeAll = false;          // true = 连边框(nofade)和背景一起淡；整块退场时才开（见 zoomanim）
     this.resize();
   }
 
@@ -137,9 +138,12 @@ export class Grid {
   set(x, y, ch, fg, bg, attr = 0, nofade = false) {
     if (!this.inBounds(x, y)) return;
     // 内容淡入：非边框字符在 fade<1 时把前景色往背景色混，越接近背景越看不见
-    if (this.fade < 1 && !nofade) {
-      const bgc = (bg != null) ? bg : this.fadeBg;
-      if (bgc != null) fg = mix(fg, bgc, 1 - this.fade);
+    if (this.fade < 1 && (!nofade || this.fadeAll)) {
+      const target = (bg != null && !this.fadeAll) ? bg : this.fadeBg;
+      if (fg != null) fg = mix(fg, target, 1 - this.fade);
+      // 整块退场（fadeAll）时背景也得跟着淡，否则框里的内容淡完了、底色还留着，
+      // 变成一地空色块拖到最后一帧才消失
+      if (this.fadeAll && bg != null) bg = mix(bg, this.fadeBg, 1 - this.fade);
     }
     const i = this.idx(x, y);
     this.chs[i] = ch; this.fgs[i] = fg; this.bgs[i] = bg; this.attrs[i] = attr;
